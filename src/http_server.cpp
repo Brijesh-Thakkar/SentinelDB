@@ -13,6 +13,8 @@
 #include "../include/kvstore.h"
 #include "../include/wal.h"
 #include "../include/guard.h"
+#include "../include/logger.h"
+#include "../include/metrics.h"
 
 // Global atomic flag for shutdown signal handling
 std::atomic<bool> shutdownRequested{false};
@@ -124,6 +126,8 @@ int main(int argc, char* argv[]) {
     // Parse command line arguments
     int port = 8080;
     std::string walPath = "data/wal.log";
+    SentinelDB::initLogger();
+    spdlog::info("SentinelDB starting up");
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -132,11 +136,13 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--wal" && i + 1 < argc) {
             walPath = argv[++i];
         } else if (arg == "--help") {
-            std::cout << "Usage: " << argv[0] << " [OPTIONS]\n"
-                      << "Options:\n"
-                      << "  --port <num>    HTTP port (default: 8080)\n"
-                      << "  --wal <path>    WAL file path (default: data/wal.log)\n"
-                      << "  --help          Show this help\n";
+            spdlog::info(
+                "Usage: {} [OPTIONS]\n"
+                "Options:\n"
+                "  --port <num>    HTTP port (default: 8080)\n"
+                "  --wal <path>    WAL file path (default: data/wal.log)\n"
+                "  --help          Show this help",
+                argv[0]);
             return 0;
         }
     }
@@ -158,7 +164,8 @@ int main(int argc, char* argv[]) {
     if (!walPath.empty()) {
         wal = std::make_shared<WAL>(walPath);
         Status walStatus = wal->initialize();
-        std::cout << "WAL enabled: " << walPath << "\n";
+        spdlog::info("WAL initialized path={}", walPath);
+        spdlog::info("WAL enabled path={}", walPath);
         
         // Replay WAL if it exists
         if (walStatus == Status::OK) {
@@ -166,7 +173,7 @@ int main(int argc, char* argv[]) {
             std::vector<std::string> walCommands = wal->readLog();
             
             if (!snapshotCommands.empty() || !walCommands.empty()) {
-                std::cout << "Replaying WAL and snapshot...\n";
+                spdlog::info("Replaying WAL and snapshot");
             }
         }
     }
@@ -211,9 +218,9 @@ int main(int argc, char* argv[]) {
                                 if (!kvstore->hasGuard(name)) {
                                     guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
                                     kvstore->addGuard(guard);
-                                    std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Restored RANGE_INT guard: {}", name);
                                 } else {
-                                    std::cout << "[WAL Replay] Skipped duplicate RANGE_INT guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Skipped duplicate RANGE_INT guard: {}", name);
                                 }
                                 
                             } else if (guardType == "ENUM") {
@@ -226,10 +233,9 @@ int main(int argc, char* argv[]) {
                                     if (!kvstore->hasGuard(name)) {
                                         guard = std::make_shared<EnumGuard>(name, keyPattern, values);
                                         kvstore->addGuard(guard);
-                                        std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
-                                                 << values.size() << " values\n";
+                                        spdlog::info("[WAL Replay] Restored ENUM guard: {} with {} values", name, values.size());
                                     } else {
-                                        std::cout << "[WAL Replay] Skipped duplicate ENUM guard: " << name << "\n";
+                                        spdlog::info("[WAL Replay] Skipped duplicate ENUM guard: {}", name);
                                     }
                                 }
                                 
@@ -239,14 +245,13 @@ int main(int argc, char* argv[]) {
                                 if (!kvstore->hasGuard(name)) {
                                     guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
                                     kvstore->addGuard(guard);
-                                    std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Restored LENGTH guard: {}", name);
                                 } else {
-                                    std::cout << "[WAL Replay] Skipped duplicate LENGTH guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Skipped duplicate LENGTH guard: {}", name);
                                 }
                             }
                         } catch (const std::exception& e) {
-                            std::cout << "[WAL Replay] WARNING: Failed to restore guard " << name 
-                                     << ": " << e.what() << "\n";
+                            spdlog::warn("[WAL Replay] Failed to restore guard {}: {}", name, e.what());
                         }
                     }
                 } else if (cmdType == "SET") {
@@ -292,9 +297,9 @@ int main(int argc, char* argv[]) {
                                 if (!kvstore->hasGuard(name)) {
                                     guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
                                     kvstore->addGuard(guard);
-                                    std::cout << "[WAL Replay] Restored RANGE_INT guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Restored RANGE_INT guard: {}", name);
                                 } else {
-                                    std::cout << "[WAL Replay] Skipped duplicate RANGE_INT guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Skipped duplicate RANGE_INT guard: {}", name);
                                 }
                                 
                             } else if (guardType == "ENUM") {
@@ -307,10 +312,9 @@ int main(int argc, char* argv[]) {
                                     if (!kvstore->hasGuard(name)) {
                                         guard = std::make_shared<EnumGuard>(name, keyPattern, values);
                                         kvstore->addGuard(guard);
-                                        std::cout << "[WAL Replay] Restored ENUM guard: " << name << " with " 
-                                                 << values.size() << " values\n";
+                                        spdlog::info("[WAL Replay] Restored ENUM guard: {} with {} values", name, values.size());
                                     } else {
-                                        std::cout << "[WAL Replay] Skipped duplicate ENUM guard: " << name << "\n";
+                                        spdlog::info("[WAL Replay] Skipped duplicate ENUM guard: {}", name);
                                     }
                                 }
                                 
@@ -320,14 +324,13 @@ int main(int argc, char* argv[]) {
                                 if (!kvstore->hasGuard(name)) {
                                     guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
                                     kvstore->addGuard(guard);
-                                    std::cout << "[WAL Replay] Restored LENGTH guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Restored LENGTH guard: {}", name);
                                 } else {
-                                    std::cout << "[WAL Replay] Skipped duplicate LENGTH guard: " << name << "\n";
+                                    spdlog::info("[WAL Replay] Skipped duplicate LENGTH guard: {}", name);
                                 }
                             }
                         } catch (const std::exception& e) {
-                            std::cout << "[WAL Replay] WARNING: Failed to restore guard " << name 
-                                     << ": " << e.what() << "\\n";
+                            spdlog::warn("[WAL Replay] Failed to restore guard {}: {}", name, e.what());
                         }
                     }
                 }
@@ -375,12 +378,18 @@ int main(int argc, char* argv[]) {
     });
     
     // Health check endpoint
-    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"status\":\"ok\"}", "application/json");
+    svr.Get("/health", [kvstore, wal](const httplib::Request&, httplib::Response& res) {
+        std::string healthJson = "{\"status\":\"ok\",\"keys\":"
+            + std::to_string(kvstore->size())
+            + ",\"wal_enabled\":"
+            + (wal && wal->isEnabled() ? "true" : "false")
+            + ",\"version\":\"1.0.0\"}";
+        res.set_content(healthJson, "application/json");
     });
     
     // POST /set - Set a key-value pair
-    svr.Post("/set", [kvstore](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/set", [kvstore, walPath](const httplib::Request& req, httplib::Response& res) {
+        RequestTimer timer("/set");
         try {
             auto params = parseSimpleJSON(req.body);
             
@@ -396,11 +405,23 @@ int main(int argc, char* argv[]) {
             Status status = kvstore->set(key, value);
             
             if (status == Status::OK) {
+                Metrics::instance().recordRequest("/set", "ok");
+                Metrics::instance().setActiveKeys(kvstore->size());
+                // Update WAL size metric
+                {
+                    struct stat walStat;
+                    if (stat(walPath.c_str(), &walStat) == 0) {
+                        Metrics::instance().setWalSize(static_cast<size_t>(walStat.st_size));
+                    }
+                }
+                spdlog::info("SET key={} status=ok", key);
                 std::stringstream json;
                 json << "{\"status\":\"ok\",\"message\":\"Key '" << escapeJSON(key) << "' set successfully\"}";
                 res.set_content(json.str(), "application/json");
             } else {
                 res.status = 500;
+                Metrics::instance().recordRequest("/set", "error");
+                spdlog::warn("SET key={} status=error", key);
                 res.set_content("{\"error\":\"Failed to set key\"}", "application/json");
             }
         } catch (const std::exception& e) {
@@ -413,9 +434,11 @@ int main(int argc, char* argv[]) {
     
     // GET /get?key=<key> - Get current value
     svr.Get("/get", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        RequestTimer timer("/get");
         try {
             if (!req.has_param("key")) {
                 res.status = 400;
+                Metrics::instance().recordRequest("/get", "not_found");
                 res.set_content("{\"error\":\"Missing 'key' parameter\"}", "application/json");
                 return;
             }
@@ -424,18 +447,21 @@ int main(int argc, char* argv[]) {
             auto value = kvstore->get(key);
             
             if (value.has_value()) {
+                Metrics::instance().recordRequest("/get", "ok");
                 std::stringstream json;
                 json << "{\"key\":\"" << escapeJSON(key) << "\",\"value\":\"" 
                      << escapeJSON(value.value()) << "\"}";
                 res.set_content(json.str(), "application/json");
             } else {
                 res.status = 404;
+                Metrics::instance().recordRequest("/get", "not_found");
                 std::stringstream json;
                 json << "{\"error\":\"Key not found\",\"key\":\"" << escapeJSON(key) << "\"}";
                 res.set_content(json.str(), "application/json");
             }
         } catch (const std::exception& e) {
             res.status = 400;
+            Metrics::instance().recordRequest("/get", "not_found");
             std::stringstream json;
             json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
             res.set_content(json.str(), "application/json");
@@ -573,18 +599,18 @@ int main(int argc, char* argv[]) {
             std::string key = params["key"];
             std::string value = params["value"];
             
-            std::cout << "[HTTP] POST /propose - Evaluating write: " << key << " = " << value << "\n";
+            spdlog::info("[HTTP] POST /propose - Evaluating write: {} = {}", key, value);
             
             // Evaluate the proposed write
             auto evaluation = kvstore->proposeSet(key, value);
-            
-            std::cout << "[HTTP] POST /propose - Result: ";
+
+            std::string resultStr;
             switch (evaluation.result) {
-                case GuardResult::ACCEPT: std::cout << "ACCEPT"; break;
-                case GuardResult::REJECT: std::cout << "REJECT"; break;
-                case GuardResult::COUNTER_OFFER: std::cout << "COUNTER_OFFER"; break;
+                case GuardResult::ACCEPT: resultStr = "ACCEPT"; break;
+                case GuardResult::REJECT: resultStr = "REJECT"; break;
+                case GuardResult::COUNTER_OFFER: resultStr = "COUNTER_OFFER"; break;
             }
-            std::cout << " (" << evaluation.alternatives.size() << " alternative(s))\n";
+            spdlog::info("[HTTP] POST /propose - Result: {} ({} alternative(s))", resultStr, evaluation.alternatives.size());
             
             std::stringstream json;
             json << "{\"proposal\":{\"key\":\"" << escapeJSON(key) 
@@ -632,7 +658,7 @@ int main(int argc, char* argv[]) {
     svr.Get("/guards", [kvstore](const httplib::Request&, httplib::Response& res) {
         try {
             const auto& guards = kvstore->getGuards();
-            std::cout << "[HTTP] GET /guards - Retrieved " << guards.size() << " guard(s)\n";
+            spdlog::info("[HTTP] GET /guards - Retrieved {} guard(s)", guards.size());
             
             std::stringstream json;
             json << "{\"guards\":[";
@@ -667,7 +693,7 @@ int main(int argc, char* argv[]) {
         try {
             auto params = parseSimpleJSON(req.body);
             
-            std::cout << "[HTTP] POST /guards - Received guard registration request\n";
+            spdlog::info("[HTTP] POST /guards - Received guard registration request");
             
             // Validate required fields
             if (params.find("type") == params.end() || 
@@ -773,14 +799,14 @@ int main(int argc, char* argv[]) {
                 
                 Status walStatus = wal->logGuardAdd(type, name, keyPattern, walParams);
                 if (walStatus == Status::OK) {
-                    std::cout << "[HTTP] POST /guards - Written to WAL: GUARD ADD " << type << " " << name << "\n";
+                    spdlog::info("[HTTP] POST /guards - Written to WAL: GUARD ADD {} {}", type, name);
                 } else {
-                    std::cout << "[HTTP] POST /guards - WARNING: Failed to write guard to WAL\n";
+                    spdlog::warn("[HTTP] POST /guards - Failed to write guard to WAL");
                 }
             }
             
-            std::cout << "[HTTP] POST /guards - Successfully added guard '" << name 
-                      << "' (type: " << type << ", pattern: " << keyPattern << ")\n";
+            spdlog::info("[HTTP] POST /guards - Successfully added guard '{}' (type: {}, pattern: {})",
+                         name, type, keyPattern);
             
             std::stringstream json;
             json << "{\"status\":\"ok\",\"message\":\"Guard '" << escapeJSON(name) 
@@ -947,7 +973,7 @@ int main(int argc, char* argv[]) {
             std::string policyStr = params["policy"];
             std::transform(policyStr.begin(), policyStr.end(), policyStr.begin(), ::toupper);
             
-            std::cout << "[HTTP] POST /policy - Changing policy to: " << policyStr << "\n";
+            spdlog::info("[HTTP] POST /policy - Changing policy to: {}", policyStr);
             
             DecisionPolicy newPolicy;
             if (policyStr == "DEV_FRIENDLY") {
@@ -969,13 +995,13 @@ int main(int argc, char* argv[]) {
             if (wal && wal->isEnabled()) {
                 Status walStatus = wal->logPolicy(policyStr);
                 if (walStatus == Status::OK) {
-                    std::cout << "[HTTP] POST /policy - Written to WAL: POLICY SET " << policyStr << "\n";
+                    spdlog::info("[HTTP] POST /policy - Written to WAL: POLICY SET {}", policyStr);
                 } else {
-                    std::cout << "[HTTP] POST /policy - WARNING: Failed to write policy to WAL\n";
+                    spdlog::warn("[HTTP] POST /policy - Failed to write policy to WAL");
                 }
             }
             
-            std::cout << "[HTTP] POST /policy - Policy changed successfully to " << policyStr << "\n";
+            spdlog::info("[HTTP] POST /policy - Policy changed successfully to {}", policyStr);
             
             std::stringstream json;
             json << "{\"status\":\"ok\",\"activePolicy\":\"" << policyStr << "\"}";
@@ -993,26 +1019,18 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signalHandler);
     
     // Start server in background thread
-    std::cout << "Temporal Database HTTP Server\n";
-    std::cout << "==============================\n";
-    std::cout << "Listening on http://localhost:" << port << "\n";
-    std::cout << "Endpoints:\n";
-    std::cout << "  GET  /health            - Health check\n";
-    std::cout << "  POST /set               - Set key-value pair\n";
-    std::cout << "  GET  /get               - Get current value\n";
-    std::cout << "  GET  /getAt             - Get value at timestamp\n";
-    std::cout << "  GET  /history           - Get version history\n";
-    std::cout << "  GET  /explain           - Explain temporal query\n";
-    std::cout << "  POST /propose           - Propose write (evaluate guards)\n";
-    std::cout << "  GET  /guards            - List guard constraints\n";
-    std::cout << "  POST /guards            - Add new guard constraint\n";
-    std::cout << "  POST /config/retention  - Configure retention\n";
-    std::cout << "  GET  /policy            - Get decision policy\n";
-    std::cout << "  POST /policy            - Set decision policy\n";
-    std::cout << "\nPress Ctrl+C to stop.\n\n";
+    spdlog::info("HTTP server listening port={}", port);
     
     // Start server in background thread
     std::thread serverThread([&svr, port]() {
+        // Prometheus metrics endpoint
+        svr.Get("/metrics", [](const httplib::Request&, httplib::Response& res) {
+            RequestTimer timer("/metrics");
+            res.set_content(Metrics::instance().toPrometheusFormat(),
+                            "text/plain; version=0.0.4");
+            Metrics::instance().recordRequest("/metrics", "ok");
+        });
+        spdlog::info("Metrics endpoint registered path=/metrics");
         svr.listen("0.0.0.0", port);
     });
     
@@ -1022,7 +1040,7 @@ int main(int argc, char* argv[]) {
     }
     
     // Graceful shutdown
-    std::cout << "\nShutting down...\n";
+    spdlog::info("SentinelDB shutting down gracefully");
     svr.stop();
     
     if (serverThread.joinable()) {
