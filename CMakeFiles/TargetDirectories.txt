@@ -1,6 +1,0 @@
-/home/brijesh-thakkar/Desktop/DSA_Project/CMakeFiles/redis_db.dir
-/home/brijesh-thakkar/Desktop/DSA_Project/CMakeFiles/test_temporal.dir
-/home/brijesh-thakkar/Desktop/DSA_Project/CMakeFiles/test_wal_temporal.dir
-/home/brijesh-thakkar/Desktop/DSA_Project/CMakeFiles/http_server.dir
-/home/brijesh-thakkar/Desktop/DSA_Project/CMakeFiles/edit_cache.dir
-/home/brijesh-thakkar/Desktop/DSA_Project/CMakeFiles/rebuild_cache.dir

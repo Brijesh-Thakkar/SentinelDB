@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/redis_db.dir/src/main.cpp.o CMakeFiles/redis_db.dir/src/kvstore.cpp.o CMakeFiles/redis_db.dir/src/command_parser.cpp.o CMakeFiles/redis_db.dir/src/wal.cpp.o CMakeFiles/redis_db.dir/src/guard.cpp.o -o redis_db 

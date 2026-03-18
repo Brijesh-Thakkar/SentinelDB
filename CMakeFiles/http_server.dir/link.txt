@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/http_server.dir/src/http_server.cpp.o CMakeFiles/http_server.dir/src/kvstore.cpp.o CMakeFiles/http_server.dir/src/wal.cpp.o CMakeFiles/http_server.dir/src/guard.cpp.o -o http_server  -lpthread 
