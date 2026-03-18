@@ -100,7 +100,7 @@ jobs:
           echo "$RESULT" | grep -q '"value":"survives_restart"' || (echo "FAIL: WAL replay" && kill $SERVER_PID && exit 1)
           
           # Corrupt key must NOT exist
-          FAKE=$(curl -sf "http://localhost:9091/get?key=badkey")
+          FAKE=$(curl -s "http://localhost:9091/get?key=badkey")
           echo "Fake key: $FAKE"
           echo "$FAKE" | grep -q '"error"' || (echo "FAIL: corrupt record was loaded" && kill $SERVER_PID && exit 1)
           
