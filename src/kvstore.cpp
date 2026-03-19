@@ -1,4 +1,5 @@
 #include "kvstore.h"
+#include "logger.h"
 #include <algorithm>
 #include <sstream>
 #include <mutex>
@@ -31,6 +32,9 @@ Status KVStore::setInternal(const std::string& key, const std::string& value) {
     
     // Apply retention policy
     applyRetention(key);
+
+    touchKey(key);
+    evictIfNeeded();
     
     return Status::OK;
 }
@@ -76,6 +80,13 @@ Status KVStore::del(const std::string& key) {
         
         // Remove all versions from in-memory store
         store.erase(it);
+        {
+            auto lruIt = lruMap_.find(key);
+            if (lruIt != lruMap_.end()) {
+                lruOrder_.erase(lruIt->second);
+                lruMap_.erase(lruIt);
+            }
+        }
         return Status::OK;
     }
     return Status::NOT_FOUND;
@@ -233,6 +244,38 @@ const RetentionPolicy& KVStore::getRetentionPolicy() const {
     // Thread safety: reader/writer lock
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return retentionPolicy;
+}
+
+void KVStore::setMaxKeys(size_t maxKeys) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    maxKeys_ = maxKeys;
+    evictIfNeeded();
+}
+
+size_t KVStore::getMaxKeys() const {
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
+    return maxKeys_;
+}
+
+void KVStore::touchKey(const std::string& key) {
+    // Called only from write-locked context
+    auto it = lruMap_.find(key);
+    if (it != lruMap_.end()) {
+        lruOrder_.erase(it->second);
+    }
+    lruOrder_.push_back(key);
+    lruMap_[key] = std::prev(lruOrder_.end());
+}
+
+void KVStore::evictIfNeeded() {
+    // Called only from write-locked context
+    while (store.size() > maxKeys_ && !lruOrder_.empty()) {
+        const std::string evictKey = lruOrder_.front();
+        lruOrder_.pop_front();
+        lruMap_.erase(evictKey);
+        store.erase(evictKey);
+        spdlog::warn("LRU evict key={} store_size={}", evictKey, store.size());
+    }
 }
 
 void KVStore::applyRetention(const std::string& key) {

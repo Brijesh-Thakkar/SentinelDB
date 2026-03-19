@@ -7,6 +7,7 @@
 #include <optional>
 #include <memory>
 #include <chrono>
+#include <list>
 #include <shared_mutex>
 #include "status.h"
 #include "wal.h"
@@ -71,6 +72,13 @@ private:
 
     // Internal helper for already-locked callers
     std::vector<std::shared_ptr<Guard>> getGuardsForKeyInternal(const std::string& key) const;
+
+    // LRU eviction
+    size_t maxKeys_{100000};
+    std::list<std::string> lruOrder_;
+    std::unordered_map<std::string, std::list<std::string>::iterator> lruMap_;
+    void touchKey(const std::string& key);
+    void evictIfNeeded();
     
     // Apply retention policy to a key's versions
     void applyRetention(const std::string& key);
@@ -126,6 +134,10 @@ public:
     
     // Get current retention policy
     const RetentionPolicy& getRetentionPolicy() const;
+
+    // Set/get maximum number of keys before LRU eviction
+    void setMaxKeys(size_t maxKeys);
+    size_t getMaxKeys() const;
     
     // ========== Write Evaluation & Guard Management ==========
     
