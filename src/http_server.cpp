@@ -7,6 +7,7 @@
 #include <atomic>
 #include <csignal>
 #include <thread>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "../include/external/httplib.h"
@@ -126,6 +127,10 @@ int main(int argc, char* argv[]) {
     // Parse command line arguments
     int port = 8080;
     std::string walPath = "data/wal.log";
+    // Security limits
+    const size_t MAX_KEY_SIZE = 256;      // 256 bytes max key
+    const size_t MAX_VALUE_SIZE = 1048576; // 1MB max value
+    const size_t MAX_BODY_SIZE = 1100000;  // slightly above value limit
     SentinelDB::initLogger();
     spdlog::info("SentinelDB starting up");
     
@@ -376,6 +381,29 @@ int main(int argc, char* argv[]) {
         {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
         {"Access-Control-Allow-Headers", "Content-Type"}
     });
+
+    // Optional API key auth — set API_KEY env var to enable
+    const char* apiKeyEnv = std::getenv("SENTINEL_API_KEY");
+    std::string requiredApiKey = apiKeyEnv ? std::string(apiKeyEnv) : "";
+
+    if (!requiredApiKey.empty()) {
+        svr.set_pre_routing_handler([requiredApiKey](const httplib::Request& req,
+                                                     httplib::Response& res) {
+            // Health check is always public
+            if (req.path == "/health") return httplib::Server::HandlerResponse::Unhandled;
+
+            auto it = req.headers.find("X-API-Key");
+            if (it == req.headers.end() || it->second != requiredApiKey) {
+                res.status = 401;
+                res.set_content("{\"error\":\"Unauthorized\"}", "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+        spdlog::info("API key authentication enabled");
+    } else {
+        spdlog::warn("No API key set — server is publicly accessible. Set SENTINEL_API_KEY env var.");
+    }
     
     // Health check endpoint
     svr.Get("/health", [kvstore, wal](const httplib::Request&, httplib::Response& res) {
@@ -388,8 +416,15 @@ int main(int argc, char* argv[]) {
     });
     
     // POST /set - Set a key-value pair
-    svr.Post("/set", [kvstore, walPath](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/set", [kvstore, walPath, MAX_BODY_SIZE, MAX_KEY_SIZE, MAX_VALUE_SIZE](const httplib::Request& req, httplib::Response& res) {
         RequestTimer timer("/set");
+        // Input validation
+        if (req.body.size() > MAX_BODY_SIZE) {
+            Metrics::instance().recordRequest("/set", "error");
+            res.status = 413;
+            res.set_content("{\"error\":\"Request too large\"}", "application/json");
+            return;
+        }
         try {
             auto params = parseSimpleJSON(req.body);
             
@@ -401,6 +436,20 @@ int main(int argc, char* argv[]) {
             
             std::string key = params["key"];
             std::string value = params["value"];
+
+            if (key.size() > MAX_KEY_SIZE) {
+                Metrics::instance().recordRequest("/set", "error");
+                res.status = 400;
+                res.set_content("{\"error\":\"Key too long (max 256 bytes)\"}", "application/json");
+                return;
+            }
+            if (value.size() > MAX_VALUE_SIZE) {
+                Metrics::instance().recordRequest("/set", "error");
+                res.status = 400;
+                res.set_content("{\"error\":\"Value too large (max 1MB)\"}", "application/json");
+                return;
+            }
+            spdlog::debug("SET key={} value_size={}", key, value.size());
             
             Status status = kvstore->set(key, value);
             
