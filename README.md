@@ -1,76 +1,43 @@
-> 🚀 **Live Demo:** http://3.26.47.215:8080/health
-
 [![CI](https://github.com/Brijesh-Thakkar/sentineldb/actions/workflows/ci.yml/badge.svg)](https://github.com/Brijesh-Thakkar/sentineldb/actions/workflows/ci.yml)
 
 # SentinelDB
 
-SentinelDB is a negotiating temporal database that simulates writes, enforces guardrails, and proposes safe alternatives instead of blindly accepting or rejecting data.
+A C++ key-value store that **negotiates instead of rejecting writes.**
 
-## Why SentinelDB Exists
-
-Traditional databases operate in binary mode: accept or reject writes. In practice, this leads to cryptic errors, failed transactions, and frustrated developers debugging constraint violations. SentinelDB introduces a decision layer that evaluates writes before they happen, explains why they would fail, and proposes valid alternatives. Instead of saying "no," the database negotiates.
-
-This approach makes data validation transparent, gives developers actionable feedback, and allows systems to adapt their strictness based on context (development vs production).
-
-## 10-Second Example
-
-**STRICT Policy** - Hard rejection:
-```
-redis> POLICY SET STRICT
-redis> GUARD ADD score* RANGE_INT 0 100
-redis> PROPOSE SET score 150
-
-Result: REJECT ✗
-Reason: Value 150 outside acceptable range [0, 100]
-```
-
-**DEV_FRIENDLY Policy** - Negotiation with alternatives:
-```
-redis> POLICY SET DEV_FRIENDLY
-redis> PROPOSE SET score 150
-
-Result: COUNTER_OFFER ⚠
-Reason: Value 150 outside acceptable range [0, 100]
-
-Safe Alternatives:
-  1) "100" → Maximum allowed value
-  2) "75"  → Conservative midpoint
-```
-
-Same constraint. Different policy. Different outcome.
-
-## Key Features
-
-- **Temporal Versioning** - Every key maintains complete version history with timestamps
-- **Write-Ahead Logging** - All operations persisted to disk with millisecond timestamps
-- **Snapshot-Based Compaction** - Prevent WAL growth while maintaining durability
-- **Guard System** - Define constraints (RANGE_INT, ENUM, LENGTH) with pattern matching
-- **Proposal-Based Writes** - `PROPOSE SET` simulates writes without committing
-- **Decision Policies** - STRICT (reject), SAFE_DEFAULT (negotiate when safe), DEV_FRIENDLY (always help)
-- **Policy Persistence** - Decision policies survive restarts via WAL and snapshots
-- **Explainable Queries** - `EXPLAIN GET key AT time` shows temporal selection reasoning
-- **Configurable Retention** - Control version history (FULL, LAST_N, LAST_T)
-- **CLI + HTTP API** - Full feature parity across interfaces
-
-## 🚀 Quick Start (Docker)
-
-Get SentinelDB running in under 2 minutes with Docker. This guide walks you through deployment, testing the guard system, and verifying Write-Ahead Log (WAL) persistence.
-
-### Step 1: Clone the Repository
+Instead of returning a cryptic constraint violation, SentinelDB evaluates your write, explains why it failed, and proposes safe alternatives.
 ```bash
-git clone https://github.com/Brijesh-Thakkar/sentineldb.git
-cd sentineldb
+pip install sentineldb-client
+```
+```python
+from sentineldb import SentinelDB
+
+db = SentinelDB("http://your-instance:8080")
+db.add_guard("score_guard", "score*", "RANGE_INT", min=0, max=100)
+
+result = db.propose("score", "150")
+# → COUNTER_OFFER
+# → Alternatives: ["100", "75"]
+
+db.safe_set("score", "150")  # commits "100" automatically
 ```
 
-### Step 2: Build the Docker Image
-```bash
-docker build -t sentineldb .
-```
+## Features
 
-This compiles the C++ codebase and packages the HTTP server into a container.
+- **Negotiation engine** — propose writes, get safe alternatives instead of hard rejections
+- **Temporal versioning** — every key stores full version history with timestamps
+- **WAL durability** — fsync + CRC32 corruption detection (same primitives as SQLite/RocksDB)
+- **Concurrent safe** — shared_mutex reader-writer locking, verified under 100 simultaneous writes
+- **Group commit** — batched fsyncs every 5ms: 52 → 2,700 writes/sec concurrent
+- **LRU eviction** — configurable key limit, prevents RAM exhaustion
+- **Prometheus metrics** — `/metrics` endpoint with request counts and latency
+- **API key auth** — optional via `SENTINEL_API_KEY` environment variable
+- **Python SDK** — full-featured client with type hints
 
-### Step 3: Run SentinelDB
+## Quick Start
+
+### Run with Docker
 ```bash
+docker build -f Dockerfile.prod -t sentineldb .
 docker run -d \
   --name sentineldb \
   -p 8080:8080 \
@@ -78,292 +45,123 @@ docker run -d \
   sentineldb
 ```
 
-The `-v sentineldb-data:/app/data` flag ensures data persists across container restarts using a named Docker volume.
-
-### Step 4: Health Check
+### Run locally
 ```bash
-curl http://localhost:8080/health
-```
-
-**Expected Response:**
-```json
-{"status":"ok"}
-```
-
-✅ SentinelDB is now running and ready to accept requests.
-
-### Step 5: Add a Guard Constraint
-```bash
-curl -X POST http://localhost:8080/guards \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type":"RANGE_INT",
-    "name":"score_guard",
-    "keyPattern":"score*",
-    "min":"0",
-    "max":"100"
-  }'
-```
-
-**Expected Response:**
-```json
-{
-  "status": "ok",
-  "message": "Guard 'score_guard' added successfully",
-  "guard": {
-    "name": "score_guard",
-    "type": "RANGE_INT",
-    "keyPattern": "score*",
-    "description": "RANGE_INT [0, 100]"
-  }
-}
-```
-
-This guard ensures any key matching `score*` must have an integer value between 0 and 100.
-
-### Step 6: Propose a Write (Test the Guard)
-```bash
-curl -X POST http://localhost:8080/propose \
-  -H "Content-Type: application/json" \
-  -d '{"key":"score","value":"150"}'
-```
-
-**Expected Response:**
-```json
-{
-  "proposal": {
-    "key": "score",
-    "value": "150"
-  },
-  "result": "COUNTER_OFFER",
-  "reason": "Value 150 outside acceptable range [0, 100]",
-  "triggeredGuards": ["score_guard"],
-  "alternatives": [
-    {
-      "value": "100",
-      "explanation": "Maximum allowed value (proposed 150 is too high)"
-    },
-    {
-      "value": "75",
-      "explanation": "Conservative value within range"
-    }
-  ]
-}
-```
-
-Instead of rejecting the write, SentinelDB **negotiates** by proposing safe alternatives.
-
-### Step 7: Verify WAL Persistence (Restart-Safe)
-```bash
-docker restart sentineldb
-sleep 3
-curl http://localhost:8080/guards
-```
-
-**Expected Response:**
-```json
-{
-  "guards": [
-    {
-      "name": "score_guard",
-      "keyPattern": "score*",
-      "description": "Integer range: [0, 100]",
-      "enabled": true
-    }
-  ]
-}
-```
-
-✅ The guard survived the restart. SentinelDB uses a **Write-Ahead Log (WAL)** to ensure all guards, policies, and data persist to disk before acknowledging writes. WAL replay during startup guarantees idempotent recovery—restarting multiple times produces identical state.
-
----
-
-### Deployment Notes
-
-**AWS EC2 Demo Instance**  
-A public demo instance is available at `http://3.107.112.47:8080` for testing. This instance is **not production-grade** and may be stopped or reset at any time. Use it for experimentation only.
-
-⚠️ **For production deployments:**
-- Use a Docker restart policy: `docker run --restart=unless-stopped ...`
-- Mount persistent volumes for `/app/data` to preserve WAL and snapshots
-- Run behind a reverse proxy (e.g., nginx) with proper authentication
-- Configure firewall rules to restrict access to trusted IPs
-
-**WAL and Data Durability**  
-SentinelDB writes all operations (guards, policies, data) to a WAL before acknowledging success. On restart, the WAL is replayed to restore exact state. Duplicate entries (e.g., guards with the same name) are automatically deduplicated during replay to maintain idempotency.
-
-## Live Deployment (AWS EC2)
-
-SentinelDB is deployed on AWS EC2 at **`http://3.107.112.47:8080`** for demonstration and testing.
-
-**Important:** SentinelDB is an API-first backend service. It does not serve a user interface at the root path `/`. Accessing `http://3.107.112.47:8080/` will return **HTTP 404**, which is expected behavior. All interaction happens through REST API endpoints.
-
-### Health Check
-```bash
-curl http://3.107.112.47:8080/health
-```
-
-**Response:**
-```json
-{"status":"ok"}
-```
-
-### List All Guards
-```bash
-curl http://3.107.112.47:8080/guards
-```
-
-**Response:**
-```json
-{
-  "guards": [
-    {
-      "name": "score_guard",
-      "keyPattern": "score*",
-      "description": "Integer range: [0, 100]",
-      "enabled": true
-    }
-  ]
-}
-```
-
-### Add a New Guard
-```bash
-curl -X POST http://3.107.112.47:8080/guards \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "RANGE_INT",
-    "name": "age_guard",
-    "keyPattern": "age*",
-    "min": "0",
-    "max": "120"
-  }'
-```
-
-### Propose a Write (Test Guard Evaluation)
-```bash
-curl -X POST http://3.107.112.47:8080/propose \
-  -H "Content-Type: application/json" \
-  -d '{"key":"score","value":"150"}'
-```
-
-**Response:**
-```json
-{
-  "proposal": {"key": "score", "value": "150"},
-  "result": "COUNTER_OFFER",
-  "reason": "Value 150 outside acceptable range [0, 100]",
-  "triggeredGuards": ["score_guard"],
-  "alternatives": [
-    {"value": "100", "explanation": "Maximum allowed value (proposed 150 is too high)"},
-    {"value": "75", "explanation": "Conservative value within range"}
-  ]
-}
-```
-
-**Deployment Stack:**
-- **Platform:** AWS EC2 (t2.micro)
-- **OS:** Ubuntu 24.04 LTS
-- **Runtime:** Docker with persistent volume mount
-- **Persistence:** Write-Ahead Log (WAL) + Snapshots
-
-**Note:** This is a public demo instance. Data may be reset, and the instance may be stopped without notice. Not intended for production use.
-
-## Run with Docker
-
-Build the image:
-```bash
-docker build -t sentineldb .
-```
-
-Run the HTTP server:
-```bash
-docker run -p 8080:8080 sentineldb
-```
-
-The server runs on port 8080. Data persists in the `/app/data` volume across container restarts.
-
-For persistent storage:
-```bash
-docker run -p 8080:8080 -v sentineldb-data:/app/data sentineldb
-```
-
-## Run Demos
-
-**CLI Demo** - Shows policy negotiation behavior:
-```bash
-./demos/demo_cli.sh
-```
-Demonstrates STRICT rejection vs DEV_FRIENDLY counter-proposals.
-
-**HTTP API Demo** - Shows remote policy control:
-```bash
-./demos/demo_http.sh
-```
-Tests policy changes, write proposals, and temporal queries via REST API.
-
-**Restart Demo** - Proves policy persistence:
-```bash
-./demos/demo_restart.sh
-```
-Verifies that policy changes survive server restarts.
-
-## Build Locally
-
-Requirements: C++17, CMake 3.10+, g++ or clang
-
-```bash
-cmake -S . -B build
-cmake --build build
-```
-
-Run CLI:
-```bash
-./build/redis_db
-```
-
-Run HTTP server:
-```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel $(nproc)
 ./build/http_server --port 8080
 ```
 
-## HTTP API Reference
+### Health check
+```bash
+curl http://localhost:8080/health
+# {"status":"ok","keys":0,"wal_enabled":true,"version":"1.0.0"}
+```
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/set` | POST | Write key-value (commits immediately) |
+## Python SDK
+```bash
+pip install sentineldb-client
+```
+```python
+from sentineldb import SentinelDB
+
+db = SentinelDB("http://localhost:8080")
+
+# Core operations
+db.set("name", "brijesh")
+db.get("name")              # "brijesh"
+db.exists("name")           # True
+
+# Temporal queries
+db.set("score", "80")
+db.set("score", "90")
+history = db.history("score")
+# [Version(value='80', timestamp='...'), Version(value='90', timestamp='...')]
+
+# Guard-based negotiation
+db.add_guard("score_guard", "score*", "RANGE_INT", min=0, max=100)
+result = db.propose("score", "150")
+# ProposalResult(status='COUNTER_OFFER', alternatives=[Alternative(value='100')])
+
+db.safe_set("score", "150")  # auto-commits best alternative
+```
+
+## HTTP API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Server status, key count, WAL status |
+| `/set` | POST | Write key-value pair |
 | `/get` | GET | Read latest value |
-| `/history` | GET | Retrieve all versions |
-| `/propose` | POST | Simulate write, get verdict |
-| `/policy` | GET | View current decision policy |
-| `/policy` | POST | Change decision policy |
+| `/delete` | DELETE | Delete a key |
+| `/history` | GET | All versions of a key |
+| `/propose` | POST | Evaluate write without committing |
+| `/guards` | GET/POST | List or add guard constraints |
+| `/policy` | GET/POST | View or change decision policy |
+| `/metrics` | GET | Prometheus metrics |
 
-All endpoints accept/return JSON.
+### Decision Policies
 
-## Project Status
+| Policy | Behavior |
+|--------|----------|
+| `STRICT` | Reject all guard violations |
+| `SAFE_DEFAULT` | Negotiate when safe alternatives exist |
+| `DEV_FRIENDLY` | Always guide toward valid values |
 
-SentinelDB is feature-complete and stable. It was built to explore:
-- How databases can provide better feedback than "constraint violation"
-- Whether negotiation is a viable alternative to rejection
-- How decision policies can adapt based on deployment context
+## Performance
+```
+Sequential 500 writes (before): 9.591s = 52 writes/sec
+Sequential 500 writes (after):  6.471s = 77 writes/sec
+Concurrent 500 writes (after):  0.185s = 2,700 writes/sec
+```
 
-The codebase is production-quality but intended for experimentation, research, and learning. It demonstrates concepts that could be integrated into existing database systems.
+Group commit batches fsync() calls every 5ms window — same durability guarantee, fraction of the cost.
 
-Core functionality:
-- Temporal versioning with millisecond precision
-- Durable persistence via WAL and snapshots
-- Policy-driven write evaluation
-- Full CLI and HTTP parity
-- Comprehensive test coverage
+## Deployment
+
+### AWS EC2
+```bash
+# On Ubuntu 22.04 t3.micro
+git clone https://github.com/Brijesh-Thakkar/sentineldb.git /opt/sentineldb
+cd /opt/sentineldb
+
+# Add swap for compilation
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j1
+
+./build/http_server --port 8080
+```
+
+See `deploy/gcp/` for systemd service and nginx reverse proxy configs.
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `SENTINEL_API_KEY` | Enable API key authentication |
+
+## Architecture
+```
+Request → Input Validation → Guard Evaluation → Policy Decision → WAL Write → Store
+                                                       ↓
+                                              ACCEPT / COUNTER_OFFER / REJECT
+```
+
+- **WAL**: append-only log with CRC32 per record, fsync via background group commit thread
+- **KVStore**: `unordered_map<string, vector<Version>>` with shared_mutex
+- **Guards**: pattern-matched constraints evaluated per write proposal
+- **LRU**: `std::list` + iterator map for O(1) eviction tracking
+
+## Build Requirements
+
+- C++17
+- CMake 3.10+
+- g++ or clang
+- pthread
 
 ## Documentation
 
-- [POLICIES.md](POLICIES.md) - Decision policy behavior and use cases
-- [POLICY_PERSISTENCE.md](POLICY_PERSISTENCE.md) - How policies persist across restarts
-- [TEMPORAL.md](TEMPORAL.md) - Temporal versioning and queries
-- [RETENTION.md](RETENTION.md) - Version retention configuration
-- [QUICKREF.md](QUICKREF.md) - Command reference
-
-## License
-
-This project is open source. See the code for implementation details.
+Full documentation available in [`docs/`](docs/).
