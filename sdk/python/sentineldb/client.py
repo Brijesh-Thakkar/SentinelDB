@@ -160,7 +160,7 @@ class SentinelDB:
     def get_policy(self) -> str:
         """Get current decision policy."""
         data = self._request("GET", "/policy")
-        return data.get("policy", "SAFE_DEFAULT")
+        return data.get("activePolicy", "SAFE_DEFAULT")
 
     # ── Observability ────────────────────────────────────────────
 
