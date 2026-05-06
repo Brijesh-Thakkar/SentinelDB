@@ -28,53 +28,20 @@ jobs:
 
       - name: Run unit tests
         run: |
-          cd build
-          ./test_temporal
-          ./test_wal_temporal
+          ./build/test_temporal
+          rm -f data/test_wal.log data/snapshot.db
+          ./build/test_wal_temporal
 
-      - name: Integration test — server health
+      - name: Integration test — HTTP JSON handling
         run: |
-          cd $(dirname $0)/../.. || true
-          cd ~/work/sentineldb/sentineldb 2>/dev/null || cd .
-          
-          # Start server in background
-          ./build/http_server --port 9090 &
-          SERVER_PID=$!
-          sleep 2
-
-          # Health check
-          HEALTH=$(curl -sf http://localhost:9090/health)
-          echo "Health: $HEALTH"
-          echo "$HEALTH" | grep -q '"status":"ok"' || (echo "FAIL: health check" && kill $SERVER_PID && exit 1)
-
-          # Write a key
-          curl -sf -X POST http://localhost:9090/set \
-            -H "Content-Type: application/json" \
-            -d '{"key":"ci_test","value":"ci_value"}' || (echo "FAIL: set" && kill $SERVER_PID && exit 1)
-
-          # Read it back
-          GET=$(curl -sf "http://localhost:9090/get?key=ci_test")
-          echo "Get: $GET"
-          echo "$GET" | grep -q '"value":"ci_value"' || (echo "FAIL: get" && kill $SERVER_PID && exit 1)
-
-          # Check metrics endpoint responds
-          METRICS=$(curl -sf http://localhost:9090/metrics)
-          echo "$METRICS" | grep -q 'sentineldb_requests_total' || (echo "FAIL: metrics" && kill $SERVER_PID && exit 1)
-
-          # WAL file must exist with content
-          ls -la data/wal.log || (echo "FAIL: WAL file missing" && kill $SERVER_PID && exit 1)
-          [ -s data/wal.log ] || (echo "FAIL: WAL file empty" && kill $SERVER_PID && exit 1)
-
-          echo "✅ All integration tests passed"
-          kill $SERVER_PID
-          wait $SERVER_PID 2>/dev/null || true
+          bash tests/test_http_json_parsing.sh
 
       - name: WAL corruption detection test
         run: |
           rm -rf data/
           
           # Start server, write keys, stop
-          ./build/http_server --port 9091 &
+          ./build/http_server --port 9091 --wal data/wal.log &
           SERVER_PID=$!
           sleep 2
           
@@ -90,7 +57,7 @@ jobs:
           echo "SET badkey badval 99999999 CRC:00000000" >> data/wal.log
           
           # Restart — corrupt record should be skipped, valid data restored
-          ./build/http_server --port 9091 2>&1 &
+          ./build/http_server --port 9091 --wal data/wal.log 2>&1 &
           SERVER_PID=$!
           sleep 2
           
