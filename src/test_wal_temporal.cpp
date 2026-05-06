@@ -61,7 +61,7 @@ int main() {
         std::string cmdType, key, value;
         long long timestampMs;
         
-        iss >> cmdType >> key >> value >> timestampMs;
+        iss >> cmdType >> std::quoted(key) >> std::quoted(value) >> timestampMs;
         
         if (cmdType == "SET") {
             auto timestamp = std::chrono::system_clock::time_point(

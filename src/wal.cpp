@@ -125,8 +125,11 @@ Status WAL::logSet(const std::string& key, const std::string& value,
         auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             timestamp.time_since_epoch()).count();
         
-        // Format: SET key value timestamp_ms
-        std::string content = "SET " + key + " " + value + " " + std::to_string(epochMs);
+        // Format: SET "key" "value" timestamp_ms
+        std::ostringstream contentStream;
+        contentStream << "SET " << std::quoted(key) << " " << std::quoted(value)
+                      << " " << epochMs;
+        std::string content = contentStream.str();
         uint32_t crc = computeCRC32(content);
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
             << crc << std::dec << std::setfill(' ') << "\n";
@@ -341,9 +344,10 @@ Status WAL::createSnapshot(const std::unordered_map<std::string, std::string>& d
             snapFile << "POLICY SET " << currentPolicy << "\n";
         }
         
-        // Write all key-value pairs as SET commands
+        // Write all key-value pairs as SET commands.
+        // Keys and values are quoted so spaces and escaped characters survive replay.
         for (const auto& [key, value] : data) {
-            snapFile << "SET " << key << " " << value << "\n";
+            snapFile << "SET " << std::quoted(key) << " " << std::quoted(value) << "\n";
         }
         
         snapFile.flush();

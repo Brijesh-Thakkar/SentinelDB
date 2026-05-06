@@ -10,12 +10,15 @@
 #include <cstdlib>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include "../include/json.hpp"
 #include "../include/external/httplib.h"
 #include "../include/kvstore.h"
 #include "../include/wal.h"
 #include "../include/guard.h"
 #include "../include/logger.h"
 #include "../include/metrics.h"
+
+using json = nlohmann::json;
 
 // Global atomic flag for shutdown signal handling
 std::atomic<bool> shutdownRequested{false};
@@ -27,50 +30,105 @@ void signalHandler(int signal) {
     }
 }
 
-// Helper function to parse JSON manually (simple key-value pairs)
-std::unordered_map<std::string, std::string> parseSimpleJSON(const std::string& json) {
-    std::unordered_map<std::string, std::string> result;
-    
-    size_t pos = 0;
-    bool inQuotes = false;
-    bool inKey = false;
-    bool inValue = false;
-    std::string key, value;
-    
-    while (pos < json.size()) {
-        char c = json[pos];
-        
-        if (c == '"') {
-            inQuotes = !inQuotes;
-            if (!inQuotes && inKey) {
-                inKey = false;
-            } else if (!inQuotes && inValue) {
-                // End of value
-                result[key] = value;
-                key.clear();
-                value.clear();
-                inValue = false;
-            } else if (inQuotes && !inKey && !inValue) {
-                // Could be start of key or value
-                if (key.empty()) {
-                    inKey = true;
-                } else {
-                    inValue = true;
-                }
-            }
-        } else if (inQuotes) {
-            // Inside quotes - capture everything
-            if (inKey) {
-                key += c;
-            } else if (inValue) {
-                value += c;
+json parseRequestJSON(const std::string& body) {
+    auto parsed = json::parse(body);
+    if (!parsed.is_object()) {
+        throw std::invalid_argument("JSON body must be an object");
+    }
+    return parsed;
+}
+
+std::string requireStringField(const json& body, const char* fieldName) {
+    auto it = body.find(fieldName);
+    if (it == body.end()) {
+        throw std::invalid_argument(std::string("Missing '") + fieldName + "' parameter");
+    }
+    if (!it->is_string()) {
+        throw std::invalid_argument(std::string("'") + fieldName + "' must be a string");
+    }
+    return it->get<std::string>();
+}
+
+std::string jsonValueToStoredString(const json& value) {
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    return value.dump();
+}
+
+int requireIntField(const json& body, const char* fieldName) {
+    auto it = body.find(fieldName);
+    if (it == body.end()) {
+        throw std::invalid_argument(std::string("Missing '") + fieldName + "' parameter");
+    }
+    if (it->is_number_integer()) {
+        return it->get<int>();
+    }
+    if (it->is_number_unsigned()) {
+        return static_cast<int>(it->get<unsigned int>());
+    }
+    if (it->is_string()) {
+        return std::stoi(it->get<std::string>());
+    }
+    throw std::invalid_argument(std::string("'") + fieldName + "' must be an integer");
+}
+
+size_t requireSizeField(const json& body, const char* fieldName) {
+    auto it = body.find(fieldName);
+    if (it == body.end()) {
+        throw std::invalid_argument(std::string("Missing '") + fieldName + "' parameter");
+    }
+    if (it->is_number_unsigned()) {
+        return it->get<size_t>();
+    }
+    if (it->is_number_integer()) {
+        int value = it->get<int>();
+        if (value < 0) {
+            throw std::invalid_argument(std::string("'") + fieldName + "' must be non-negative");
+        }
+        return static_cast<size_t>(value);
+    }
+    if (it->is_string()) {
+        return std::stoul(it->get<std::string>());
+    }
+    throw std::invalid_argument(std::string("'") + fieldName + "' must be an integer");
+}
+
+std::vector<std::string> parseEnumValues(const json& body) {
+    auto it = body.find("values");
+    if (it == body.end()) {
+        throw std::invalid_argument("Missing 'values' parameter");
+    }
+
+    std::vector<std::string> values;
+    if (it->is_array()) {
+        for (const auto& entry : *it) {
+            values.push_back(jsonValueToStoredString(entry));
+        }
+    } else {
+        std::stringstream ss(jsonValueToStoredString(*it));
+        std::string value;
+        while (std::getline(ss, value, ',')) {
+            value.erase(0, value.find_first_not_of(" \t\n\r"));
+            value.erase(value.find_last_not_of(" \t\n\r") + 1);
+            if (!value.empty()) {
+                values.push_back(value);
             }
         }
-        
-        pos++;
     }
-    
-    return result;
+
+    return values;
+}
+
+std::string joinWalValues(const std::vector<std::string>& values) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            oss << ' ';
+        }
+        oss << values[i];
+    }
+    return oss.str();
 }
 
 // Helper function to escape JSON strings
@@ -350,7 +408,7 @@ int main(int argc, char* argv[]) {
                 if (cmdType == "SET") {
                     std::string key, value;
                     long long timestampMs = 0;
-                    iss >> key >> value;
+                    iss >> std::quoted(key) >> std::quoted(value);
                     
                     if (iss >> timestampMs) {
                         auto timestamp = std::chrono::system_clock::time_point(
@@ -426,16 +484,15 @@ int main(int argc, char* argv[]) {
             return;
         }
         try {
-            auto params = parseSimpleJSON(req.body);
-            
-            if (params.find("key") == params.end() || params.find("value") == params.end()) {
+            auto params = parseRequestJSON(req.body);
+            std::string key = requireStringField(params, "key");
+            auto valueIt = params.find("value");
+            if (valueIt == params.end()) {
                 res.status = 400;
                 res.set_content("{\"error\":\"Missing 'key' or 'value' parameter\"}", "application/json");
                 return;
             }
-            
-            std::string key = params["key"];
-            std::string value = params["value"];
+            std::string value = jsonValueToStoredString(*valueIt);
 
             if (key.size() > MAX_KEY_SIZE) {
                 Metrics::instance().recordRequest("/set", "error");
@@ -637,16 +694,15 @@ int main(int argc, char* argv[]) {
     // POST /propose - Propose a write and get evaluation
     svr.Post("/propose", [kvstore](const httplib::Request& req, httplib::Response& res) {
         try {
-            auto params = parseSimpleJSON(req.body);
-            
-            if (params.find("key") == params.end() || params.find("value") == params.end()) {
+            auto params = parseRequestJSON(req.body);
+            std::string key = requireStringField(params, "key");
+            auto valueIt = params.find("value");
+            if (valueIt == params.end()) {
                 res.status = 400;
                 res.set_content("{\"error\":\"Missing 'key' or 'value' parameter\"}", "application/json");
                 return;
             }
-            
-            std::string key = params["key"];
-            std::string value = params["value"];
+            std::string value = jsonValueToStoredString(*valueIt);
             
             spdlog::info("[HTTP] POST /propose - Evaluating write: {} = {}", key, value);
             
@@ -740,22 +796,22 @@ int main(int argc, char* argv[]) {
     // LENGTH:    {"type":"LENGTH","name":"guard_name","keyPattern":"key*","min":"1","max":"50"}
     svr.Post("/guards", [kvstore, wal](const httplib::Request& req, httplib::Response& res) {
         try {
-            auto params = parseSimpleJSON(req.body);
+            auto params = parseRequestJSON(req.body);
             
             spdlog::info("[HTTP] POST /guards - Received guard registration request");
             
             // Validate required fields
-            if (params.find("type") == params.end() || 
-                params.find("name") == params.end() || 
+            if (params.find("type") == params.end() ||
+                params.find("name") == params.end() ||
                 params.find("keyPattern") == params.end()) {
                 res.status = 400;
                 res.set_content("{\"error\":\"Missing required fields: type, name, keyPattern\"}", "application/json");
                 return;
             }
             
-            std::string type = params["type"];
-            std::string name = params["name"];
-            std::string keyPattern = params["keyPattern"];
+            std::string type = requireStringField(params, "type");
+            std::string name = requireStringField(params, "name");
+            std::string keyPattern = requireStringField(params, "keyPattern");
             
             // Convert type to uppercase for consistency
             std::transform(type.begin(), type.end(), type.begin(), ::toupper);
@@ -771,8 +827,8 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 
-                int min = std::stoi(params["min"]);
-                int max = std::stoi(params["max"]);
+                int min = requireIntField(params, "min");
+                int max = requireIntField(params, "max");
                 
                 guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
                 description = "RANGE_INT [" + std::to_string(min) + ", " + std::to_string(max) + "]";
@@ -786,20 +842,7 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 
-                std::string valuesStr = params["values"];
-                std::vector<std::string> values;
-                
-                // Parse comma-separated values
-                std::stringstream ss(valuesStr);
-                std::string value;
-                while (std::getline(ss, value, ',')) {
-                    // Trim whitespace
-                    value.erase(0, value.find_first_not_of(" \t\n\r"));
-                    value.erase(value.find_last_not_of(" \t\n\r") + 1);
-                    if (!value.empty()) {
-                        values.push_back(value);
-                    }
-                }
+                std::vector<std::string> values = parseEnumValues(params);
                 
                 if (values.empty()) {
                     res.status = 400;
@@ -818,8 +861,8 @@ int main(int argc, char* argv[]) {
                     return;
                 }
                 
-                size_t min = std::stoul(params["min"]);
-                size_t max = std::stoul(params["max"]);
+                size_t min = requireSizeField(params, "min");
+                size_t max = requireSizeField(params, "max");
                 
                 guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
                 description = "LENGTH [" + std::to_string(min) + ", " + std::to_string(max) + "] characters";
@@ -837,13 +880,13 @@ int main(int argc, char* argv[]) {
             if (wal && wal->isEnabled()) {
                 std::string walParams;
                 if (type == "RANGE_INT" || type == "RANGE") {
-                    walParams = params["min"] + " " + params["max"];
+                    walParams = std::to_string(requireIntField(params, "min")) + " " +
+                                std::to_string(requireIntField(params, "max"));
                 } else if (type == "ENUM") {
-                    walParams = params["values"];
-                    // Replace commas with spaces for WAL format
-                    std::replace(walParams.begin(), walParams.end(), ',', ' ');
+                    walParams = joinWalValues(parseEnumValues(params));
                 } else if (type == "LENGTH") {
-                    walParams = params["min"] + " " + params["max"];
+                    walParams = std::to_string(requireSizeField(params, "min")) + " " +
+                                std::to_string(requireSizeField(params, "max"));
                 }
                 
                 Status walStatus = wal->logGuardAdd(type, name, keyPattern, walParams);
@@ -887,15 +930,8 @@ int main(int argc, char* argv[]) {
     // POST /config/retention - Configure retention policy
     svr.Post("/config/retention", [kvstore](const httplib::Request& req, httplib::Response& res) {
         try {
-            auto params = parseSimpleJSON(req.body);
-            
-            if (params.find("mode") == params.end()) {
-                res.status = 400;
-                res.set_content("{\"error\":\"Missing 'mode' parameter\"}", "application/json");
-                return;
-            }
-            
-            std::string modeStr = params["mode"];
+            auto params = parseRequestJSON(req.body);
+            std::string modeStr = requireStringField(params, "mode");
             std::transform(modeStr.begin(), modeStr.end(), modeStr.begin(), ::toupper);
             
             RetentionPolicy policy;
@@ -1011,15 +1047,8 @@ int main(int argc, char* argv[]) {
     // POST /policy - Set decision policy
     svr.Post("/policy", [kvstore, wal](const httplib::Request& req, httplib::Response& res) {
         try {
-            auto params = parseSimpleJSON(req.body);
-            
-            if (params.find("policy") == params.end()) {
-                res.status = 400;
-                res.set_content("{\"error\":\"Missing 'policy' parameter\"}", "application/json");
-                return;
-            }
-            
-            std::string policyStr = params["policy"];
+            auto params = parseRequestJSON(req.body);
+            std::string policyStr = requireStringField(params, "policy");
             std::transform(policyStr.begin(), policyStr.end(), policyStr.begin(), ::toupper);
             
             spdlog::info("[HTTP] POST /policy - Changing policy to: {}", policyStr);

@@ -759,12 +759,18 @@ int main() {
                 
                 // Second pass: Load data from snapshot
                 for (const auto& cmdLine : snapshotCommands) {
-                    Command cmd = CommandParser::parse(cmdLine);
-                    
-                    // Only replay SET commands from snapshot
-                    // Use setAtTime to avoid logging, but use current time since snapshot doesn't store timestamps
-                    if (cmd.type == CommandType::SET && cmd.args.size() >= 2) {
-                        kvstore->setAtTime(cmd.args[0], cmd.args[1], snapshotTime);
+                    std::istringstream iss(cmdLine);
+                    std::string cmdType;
+                    iss >> cmdType;
+
+                    // Only replay SET commands from snapshot.
+                    // Use setAtTime to avoid logging, but use current time since snapshot doesn't store timestamps.
+                    if (cmdType == "SET") {
+                        std::string key, value;
+                        iss >> std::quoted(key) >> std::quoted(value);
+                        if (!key.empty()) {
+                            kvstore->setAtTime(key, value, snapshotTime);
+                        }
                     }
                 }
                 kvstore->setWalEnabled(true);
@@ -817,7 +823,7 @@ int main() {
                     if (cmdType == "SET") {
                         std::string key, value;
                         long long timestampMs = 0;
-                        iss >> key >> value;
+                        iss >> std::quoted(key) >> std::quoted(value);
                         
                         // Try to read timestamp (may not exist in old format)
                         if (iss >> timestampMs) {
