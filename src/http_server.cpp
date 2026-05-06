@@ -1066,18 +1066,8 @@ int main(int argc, char* argv[]) {
                 return;
             }
             
-            // Set policy in memory
+            // Set policy in memory (WAL persistence is handled inside kvstore)
             kvstore->setDecisionPolicy(newPolicy);
-            
-            // Write to WAL for persistence (matching CLI behavior: "POLICY SET <name>")
-            if (wal && wal->isEnabled()) {
-                Status walStatus = wal->logPolicy(policyStr);
-                if (walStatus == Status::OK) {
-                    spdlog::info("[HTTP] POST /policy - Written to WAL: POLICY SET {}", policyStr);
-                } else {
-                    spdlog::warn("[HTTP] POST /policy - Failed to write policy to WAL");
-                }
-            }
             
             spdlog::info("[HTTP] POST /policy - Policy changed successfully to {}", policyStr);
             
