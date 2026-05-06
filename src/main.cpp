@@ -5,11 +5,92 @@
 #include <iomanip>
 #include <ctime>
 #include <algorithm>
+#include <cctype>
+#include <optional>
 #include "kvstore.h"
 #include "command_parser.h"
 #include "command.h"
 #include "status.h"
 #include "wal.h"
+
+namespace {
+    bool isAllDigits(const std::string& text) {
+        if (text.empty()) {
+            return false;
+        }
+        return std::all_of(text.begin(), text.end(), [](unsigned char c) {
+            return std::isdigit(c);
+        });
+    }
+
+    std::string joinTokens(const std::vector<std::string>& tokens) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (i > 0) {
+                oss << ' ';
+            }
+            oss << tokens[i];
+        }
+        return oss.str();
+    }
+
+    bool parseSetLine(const std::string& cmdLine,
+                      std::string& key,
+                      std::string& value,
+                      std::optional<long long>& timestampMs,
+                      bool allowTimestamp) {
+        std::istringstream iss(cmdLine);
+        std::string cmdType;
+        if (!(iss >> cmdType) || cmdType != "SET") {
+            return false;
+        }
+
+        if (!(iss >> std::quoted(key))) {
+            return false;
+        }
+
+        std::string remainder;
+        std::getline(iss >> std::ws, remainder);
+        if (remainder.empty()) {
+            return false;
+        }
+
+        if (!remainder.empty() && remainder.front() == '"') {
+            std::istringstream valueStream(remainder);
+            if (!(valueStream >> std::quoted(value))) {
+                return false;
+            }
+
+            long long ts = 0;
+            if (allowTimestamp && (valueStream >> ts)) {
+                timestampMs = ts;
+            }
+            return true;
+        }
+
+        std::istringstream valueStream(remainder);
+        std::vector<std::string> parts;
+        std::string part;
+        while (valueStream >> part) {
+            parts.push_back(part);
+        }
+        if (parts.empty()) {
+            return false;
+        }
+
+        if (allowTimestamp && parts.size() > 1 && isAllDigits(parts.back())) {
+            try {
+                timestampMs = std::stoll(parts.back());
+                parts.pop_back();
+            } catch (...) {
+                timestampMs.reset();
+            }
+        }
+
+        value = joinTokens(parts);
+        return true;
+    }
+}
 
 class RedisLikeCLI {
 private:
@@ -899,8 +980,8 @@ int main() {
                     // Use setAtTime to avoid logging, but use current time since snapshot doesn't store timestamps.
                     if (cmdType == "SET") {
                         std::string key, value;
-                        iss >> std::quoted(key) >> std::quoted(value);
-                        if (!key.empty()) {
+                        std::optional<long long> ignoredTimestamp;
+                        if (parseSetLine(cmdLine, key, value, ignoredTimestamp, false) && !key.empty()) {
                             kvstore->setAtTime(key, value, snapshotTime);
                         }
                     }
@@ -954,17 +1035,16 @@ int main() {
                     
                     if (cmdType == "SET") {
                         std::string key, value;
-                        long long timestampMs = 0;
-                        iss >> std::quoted(key) >> std::quoted(value);
-                        
-                        // Try to read timestamp (may not exist in old format)
-                        if (iss >> timestampMs) {
-                            // New format with timestamp
+                        std::optional<long long> timestampMs;
+                        if (!parseSetLine(cmdLine, key, value, timestampMs, true) || key.empty()) {
+                            continue;
+                        }
+
+                        if (timestampMs.has_value()) {
                             auto timestamp = std::chrono::system_clock::time_point(
-                                std::chrono::milliseconds(timestampMs));
+                                std::chrono::milliseconds(timestampMs.value()));
                             kvstore->setAtTime(key, value, timestamp);
                         } else {
-                            // Old format without timestamp - use current time
                             kvstore->setAtTime(key, value, std::chrono::system_clock::now());
                         }
                     } else if (cmdType == "DEL") {

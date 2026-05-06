@@ -58,6 +58,21 @@ Command CommandParser::parse(const std::string& input) {
     
     // Get command type from first token
     cmd.type = getCommandType(tokens[0]);
+
+    if (cmd.type == CommandType::SET) {
+        if (tokens.size() > 1) {
+            cmd.args.push_back(tokens[1]);
+            if (tokens.size() > 2) {
+                std::string value;
+                for (size_t i = 2; i < tokens.size(); ++i) {
+                    if (i > 2) value += " ";
+                    value += tokens[i];
+                }
+                cmd.args.push_back(value);
+            }
+        }
+        return cmd;
+    }
     
     // Store remaining tokens as arguments
     if (tokens.size() > 1) {
