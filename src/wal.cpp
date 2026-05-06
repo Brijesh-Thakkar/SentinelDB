@@ -330,7 +330,9 @@ std::vector<std::string> WAL::readSnapshot() {
 }
 
 Status WAL::createSnapshot(const std::unordered_map<std::string, std::string>& data,
-                          const std::string& currentPolicy) {
+                          const std::string& currentPolicy,
+                          const std::vector<std::string>& guardCommands,
+                          const std::string& retentionCommand) {
     try {
         // Open snapshot file for writing (truncate mode)
         std::ofstream snapFile(snapshotPath, std::ios::trunc);
@@ -344,6 +346,18 @@ Status WAL::createSnapshot(const std::unordered_map<std::string, std::string>& d
             snapFile << "POLICY SET " << currentPolicy << "\n";
         }
         
+        // Write retention configuration (if provided)
+        if (!retentionCommand.empty()) {
+            snapFile << retentionCommand << "\n";
+        }
+
+        // Write guards
+        for (const auto& guardLine : guardCommands) {
+            if (!guardLine.empty()) {
+                snapFile << guardLine << "\n";
+            }
+        }
+
         // Write all key-value pairs as SET commands.
         // Keys and values are quoted so spaces and escaped characters survive replay.
         for (const auto& [key, value] : data) {

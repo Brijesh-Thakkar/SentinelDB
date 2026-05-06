@@ -64,7 +64,9 @@ public:
     
     // Create snapshot from current state and clear WAL
     Status createSnapshot(const std::unordered_map<std::string, std::string>& data,
-                         const std::string& currentPolicy = "");
+                         const std::string& currentPolicy = "",
+                         const std::vector<std::string>& guardCommands = {},
+                         const std::string& retentionCommand = "");
     
     // Check if WAL is enabled and working
     bool isEnabled() const;

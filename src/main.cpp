@@ -162,6 +162,62 @@ private:
             std::cout << "(integer) 0\n";
         }
     }
+
+    std::string buildRetentionSnapshotCommand() const {
+        const RetentionPolicy& policy = kvstore->getRetentionPolicy();
+        switch (policy.mode) {
+            case RetentionMode::FULL:
+                return "CONFIG RETENTION FULL";
+            case RetentionMode::LAST_N:
+                return "CONFIG RETENTION LAST " + std::to_string(policy.count);
+            case RetentionMode::LAST_T:
+                return "CONFIG RETENTION LAST " + std::to_string(policy.seconds) + "s";
+        }
+        return "";
+    }
+
+    std::string joinGuardValues(const std::vector<std::string>& values) const {
+        std::ostringstream oss;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i > 0) {
+                oss << ' ';
+            }
+            oss << values[i];
+        }
+        return oss.str();
+    }
+
+    std::vector<std::string> buildGuardSnapshotCommands() const {
+        std::vector<std::string> commands;
+        const auto& guards = kvstore->getGuards();
+
+        for (const auto& guard : guards) {
+            if (auto rangeGuard = std::dynamic_pointer_cast<RangeIntGuard>(guard)) {
+                std::ostringstream oss;
+                oss << "GUARD ADD RANGE_INT " << rangeGuard->getName() << " "
+                    << rangeGuard->getKeyPattern() << " "
+                    << rangeGuard->getMinValue() << " " << rangeGuard->getMaxValue();
+                commands.push_back(oss.str());
+            } else if (auto enumGuard = std::dynamic_pointer_cast<EnumGuard>(guard)) {
+                const auto& values = enumGuard->getAllowedValues();
+                if (!values.empty()) {
+                    std::ostringstream oss;
+                    oss << "GUARD ADD ENUM " << enumGuard->getName() << " "
+                        << enumGuard->getKeyPattern() << " "
+                        << joinGuardValues(values);
+                    commands.push_back(oss.str());
+                }
+            } else if (auto lengthGuard = std::dynamic_pointer_cast<LengthGuard>(guard)) {
+                std::ostringstream oss;
+                oss << "GUARD ADD LENGTH " << lengthGuard->getName() << " "
+                    << lengthGuard->getKeyPattern() << " "
+                    << lengthGuard->getMinLength() << " " << lengthGuard->getMaxLength();
+                commands.push_back(oss.str());
+            }
+        }
+
+        return commands;
+    }
     
     void handleSnapshot() {
         if (!wal || !wal->isEnabled()) {
@@ -184,8 +240,11 @@ private:
                 break;
         }
         
-        // Create snapshot with current store data and policy
-        Status status = wal->createSnapshot(kvstore->getAllData(), policyName);
+        std::vector<std::string> guardCommands = buildGuardSnapshotCommands();
+        std::string retentionCommand = buildRetentionSnapshotCommand();
+
+        // Create snapshot with current store data, policy, guards, and retention config
+        Status status = wal->createSnapshot(kvstore->getAllData(), policyName, guardCommands, retentionCommand);
         
         if (status == Status::OK) {
             std::cout << "OK\n";
@@ -733,14 +792,15 @@ int main() {
                 kvstore->setWalEnabled(false);
                 auto snapshotTime = std::chrono::system_clock::now();
                 
-                // First pass: Load policy from snapshot
+                // First pass: Load policy, retention config, and guards from snapshot
                 for (const auto& cmdLine : snapshotCommands) {
-                    Command cmd = CommandParser::parse(cmdLine);
-                    
-                    if (cmd.type == CommandType::POLICY && cmd.args.size() >= 2) {
-                        std::string subCmd = cmd.args[0];
-                        std::string policyName = cmd.args[1];
-                        
+                    std::istringstream iss(cmdLine);
+                    std::string cmdType;
+                    iss >> cmdType;
+
+                    if (cmdType == "POLICY") {
+                        std::string subCmd, policyName;
+                        iss >> subCmd >> policyName;
                         if (subCmd == "SET") {
                             DecisionPolicy policy;
                             if (policyName == "DEV_FRIENDLY") {
@@ -753,6 +813,78 @@ int main() {
                                 continue;
                             }
                             kvstore->setDecisionPolicy(policy);
+                        }
+                    } else if (cmdType == "CONFIG") {
+                        std::string subCmd, modeToken;
+                        iss >> subCmd >> modeToken;
+                        std::transform(subCmd.begin(), subCmd.end(), subCmd.begin(), ::toupper);
+                        std::transform(modeToken.begin(), modeToken.end(), modeToken.begin(), ::toupper);
+
+                        if (subCmd == "RETENTION") {
+                            if (modeToken == "FULL") {
+                                kvstore->setRetentionPolicy(RetentionPolicy());
+                            } else if (modeToken == "LAST") {
+                                std::string valueToken;
+                                iss >> valueToken;
+                                if (!valueToken.empty()) {
+                                    bool isTimeBased = false;
+                                    if (!valueToken.empty() &&
+                                        (valueToken.back() == 's' || valueToken.back() == 'S')) {
+                                        isTimeBased = true;
+                                        valueToken.pop_back();
+                                    }
+
+                                    try {
+                                        int value = std::stoi(valueToken);
+                                        if (value > 0) {
+                                            if (isTimeBased) {
+                                                kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_T, value));
+                                            } else {
+                                                kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_N, value));
+                                            }
+                                        }
+                                    } catch (...) {
+                                        // Ignore invalid retention config
+                                    }
+                                }
+                            }
+                        }
+                    } else if (cmdType == "GUARD") {
+                        std::string subCmd, guardType, name, keyPattern;
+                        iss >> subCmd >> guardType >> name >> keyPattern;
+
+                        if (subCmd == "ADD") {
+                            try {
+                                std::shared_ptr<Guard> guard;
+
+                                if (guardType == "RANGE_INT") {
+                                    int min, max;
+                                    iss >> min >> max;
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
+                                        kvstore->addGuard(guard);
+                                    }
+                                } else if (guardType == "ENUM") {
+                                    std::vector<std::string> values;
+                                    std::string value;
+                                    while (iss >> value) {
+                                        values.push_back(value);
+                                    }
+                                    if (!values.empty() && !kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<EnumGuard>(name, keyPattern, values);
+                                        kvstore->addGuard(guard);
+                                    }
+                                } else if (guardType == "LENGTH") {
+                                    size_t min, max;
+                                    iss >> min >> max;
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
+                                        kvstore->addGuard(guard);
+                                    }
+                                }
+                            } catch (...) {
+                                // Ignore invalid guard entries in snapshot
+                            }
                         }
                     }
                 }

@@ -267,6 +267,41 @@ int main(int argc, char* argv[]) {
                             kvstore->setDecisionPolicy(DecisionPolicy::STRICT);
                         }
                     }
+                } else if (cmdType == "CONFIG") {
+                    std::string subCmd, modeToken;
+                    iss >> subCmd >> modeToken;
+                    std::transform(subCmd.begin(), subCmd.end(), subCmd.begin(), ::toupper);
+                    std::transform(modeToken.begin(), modeToken.end(), modeToken.begin(), ::toupper);
+
+                    if (subCmd == "RETENTION") {
+                        if (modeToken == "FULL") {
+                            kvstore->setRetentionPolicy(RetentionPolicy());
+                        } else if (modeToken == "LAST") {
+                            std::string valueToken;
+                            iss >> valueToken;
+                            if (!valueToken.empty()) {
+                                bool isTimeBased = false;
+                                if (!valueToken.empty() &&
+                                    (valueToken.back() == 's' || valueToken.back() == 'S')) {
+                                    isTimeBased = true;
+                                    valueToken.pop_back();
+                                }
+
+                                try {
+                                    int value = std::stoi(valueToken);
+                                    if (value > 0) {
+                                        if (isTimeBased) {
+                                            kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_T, value));
+                                        } else {
+                                            kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_N, value));
+                                        }
+                                    }
+                                } catch (...) {
+                                    // Ignore invalid retention config
+                                }
+                            }
+                        }
+                    }
                 } else if (cmdType == "GUARD") {
                     std::string subCmd, guardType, name, keyPattern;
                     iss >> subCmd >> guardType >> name >> keyPattern;
@@ -344,6 +379,41 @@ int main(int argc, char* argv[]) {
                             kvstore->setDecisionPolicy(DecisionPolicy::SAFE_DEFAULT);
                         } else if (policyName == "STRICT") {
                             kvstore->setDecisionPolicy(DecisionPolicy::STRICT);
+                        }
+                    }
+                } else if (cmdType == "CONFIG") {
+                    std::string subCmd, modeToken;
+                    iss >> subCmd >> modeToken;
+                    std::transform(subCmd.begin(), subCmd.end(), subCmd.begin(), ::toupper);
+                    std::transform(modeToken.begin(), modeToken.end(), modeToken.begin(), ::toupper);
+
+                    if (subCmd == "RETENTION") {
+                        if (modeToken == "FULL") {
+                            kvstore->setRetentionPolicy(RetentionPolicy());
+                        } else if (modeToken == "LAST") {
+                            std::string valueToken;
+                            iss >> valueToken;
+                            if (!valueToken.empty()) {
+                                bool isTimeBased = false;
+                                if (!valueToken.empty() &&
+                                    (valueToken.back() == 's' || valueToken.back() == 'S')) {
+                                    isTimeBased = true;
+                                    valueToken.pop_back();
+                                }
+
+                                try {
+                                    int value = std::stoi(valueToken);
+                                    if (value > 0) {
+                                        if (isTimeBased) {
+                                            kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_T, value));
+                                        } else {
+                                            kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_N, value));
+                                        }
+                                    }
+                                } catch (...) {
+                                    // Ignore invalid retention config
+                                }
+                            }
                         }
                     }
                 } else if (cmdType == "GUARD") {

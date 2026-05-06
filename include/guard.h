@@ -98,6 +98,8 @@ public:
     GuardResult evaluate(const std::string& proposedValue, std::string& reason) const override;
     std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const override;
     std::string describe() const override;
+    int getMinValue() const { return minValue; }
+    int getMaxValue() const { return maxValue; }
 };
 
 // Enum values guard
@@ -113,6 +115,7 @@ public:
     GuardResult evaluate(const std::string& proposedValue, std::string& reason) const override;
     std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const override;
     std::string describe() const override;
+    const std::vector<std::string>& getAllowedValues() const { return allowedValues; }
 };
 
 // Length guard
@@ -129,6 +132,8 @@ public:
     GuardResult evaluate(const std::string& proposedValue, std::string& reason) const override;
     std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const override;
     std::string describe() const override;
+    size_t getMinLength() const { return minLength; }
+    size_t getMaxLength() const { return maxLength; }
 };
 
 #endif // GUARD_H
