@@ -131,6 +131,7 @@ CommandType CommandParser::getCommandType(const std::string& cmd) {
     
     if (upper == "SET") return CommandType::SET;
     if (upper == "GET") return CommandType::GET;
+    if (upper == "DIFF") return CommandType::DIFF;
     if (upper == "DEL") return CommandType::DEL;
     if (upper == "HISTORY") return CommandType::HISTORY;
     if (upper == "SNAPSHOT") return CommandType::SNAPSHOT;

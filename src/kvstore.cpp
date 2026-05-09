@@ -120,6 +120,74 @@ std::optional<std::string> KVStore::getAtTime(const std::string& key,
     return std::prev(upper)->value;
 }
 
+DiffResult KVStore::diffAtTime(const std::string& key,
+                               std::chrono::system_clock::time_point t1,
+                               std::chrono::system_clock::time_point t2) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    DiffResult result;
+    result.key = key;
+    result.from = t1;
+    result.to = t2;
+    result.changed = false;
+    result.hasEvaluation = false;
+
+    auto getValueAt = [&](const std::string& targetKey, std::chrono::system_clock::time_point ts)
+        -> std::optional<std::string> {
+        auto it = store.find(targetKey);
+        if (it == store.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+
+        const auto& versions = it->second;
+        auto upper = std::upper_bound(
+            versions.begin(),
+            versions.end(),
+            ts,
+            [](const auto& timestamp, const Version& version) {
+                return timestamp < version.timestamp;
+            }
+        );
+
+        if (upper == versions.begin()) {
+            return std::nullopt;
+        }
+
+        return std::prev(upper)->value;
+    };
+
+    result.oldValue = getValueAt(key, t1);
+    result.newValue = getValueAt(key, t2);
+    result.changed = result.oldValue != result.newValue;
+
+    if (result.newValue.has_value()) {
+        auto storeProvider = [this](const std::string& targetKey) -> std::optional<std::string> {
+            auto it = store.find(targetKey);
+            if (it != store.end() && !it->second.empty()) {
+                return it->second.back().value;
+            }
+            return std::nullopt;
+        };
+
+        auto timeProvider = [&](const std::string& targetKey) -> std::optional<std::string> {
+            return getValueAt(targetKey, t1);
+        };
+
+        for (const auto& guard : guards) {
+            guard->setValueProvider(timeProvider);
+        }
+
+        result.evaluation = simulateWrite(key, result.newValue.value());
+        applyDecisionPolicy(result.evaluation);
+        result.hasEvaluation = true;
+
+        for (const auto& guard : guards) {
+            guard->setValueProvider(storeProvider);
+        }
+    }
+
+    return result;
+}
+
 ExplainResult KVStore::explainGetAtTime(const std::string& key,
                                          std::chrono::system_clock::time_point timestamp) {
     // Thread safety: reader/writer lock

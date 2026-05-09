@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-enum class CommandType { SET, GET, GETAT, DEL, HISTORY, SNAPSHOT, CONFIG, EXPLAIN, 
+enum class CommandType { SET, GET, GETAT, DIFF, DEL, HISTORY, SNAPSHOT, CONFIG, EXPLAIN, 
                          PROPOSE, GUARD, POLICY, EXIT, INVALID };
 
 struct Command {

@@ -23,6 +23,15 @@ namespace {
         });
     }
 
+    std::string guardResultToString(GuardResult result) {
+        switch (result) {
+            case GuardResult::ACCEPT: return "ACCEPT";
+            case GuardResult::REJECT: return "REJECT";
+            case GuardResult::COUNTER_OFFER: return "COUNTER_OFFER";
+        }
+        return "REJECT";
+    }
+
     std::string joinTokens(const std::vector<std::string>& tokens) {
         std::ostringstream oss;
         for (size_t i = 0; i < tokens.size(); ++i) {
@@ -105,7 +114,7 @@ public:
     void run() {
         std::cout << "Redis-like Key-Value Database\n";
         std::cout << "Commands: SET key value | GET key | GET key AT <timestamp> | HISTORY key\n";
-        std::cout << "          DEL key | SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
+        std::cout << "          DIFF key <t1> <t2> | DEL key | SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
         std::cout << "Type 'EXIT' to quit\n\n";
 
         while (running) {
@@ -146,6 +155,10 @@ private:
                 
                 case CommandType::GETAT:
                     handleGetAt(cmd);
+                    break;
+
+                case CommandType::DIFF:
+                    handleDiff(cmd);
                     break;
                 
                 case CommandType::HISTORY:
@@ -504,6 +517,55 @@ private:
         }
         
         std::cout << "====================================\n\n";
+    }
+
+    void handleDiff(const Command& cmd) {
+        if (cmd.args.size() < 3) {
+            std::cout << "(error) ERR wrong number of arguments for 'DIFF' command\n";
+            std::cout << "Usage: DIFF <key> <t1> <t2>\n";
+            return;
+        }
+
+        const std::string& key = cmd.args[0];
+        const std::string& t1Str = cmd.args[1];
+        const std::string& t2Str = cmd.args[2];
+
+        auto t1 = parseTimestamp(t1Str);
+        if (!t1.has_value()) {
+            std::cout << "(error) ERR invalid t1 timestamp format. Use epoch milliseconds or 'YYYY-MM-DD HH:MM:SS'\n";
+            return;
+        }
+        auto t2 = parseTimestamp(t2Str);
+        if (!t2.has_value()) {
+            std::cout << "(error) ERR invalid t2 timestamp format. Use epoch milliseconds or 'YYYY-MM-DD HH:MM:SS'\n";
+            return;
+        }
+
+        auto diff = kvstore->diffAtTime(key, t1.value(), t2.value());
+
+        std::cout << "\n========== DIFF ==========" << "\n";
+        std::cout << "Key:     " << diff.key << "\n";
+        std::cout << "From:    " << formatTimestamp(diff.from) << "\n";
+        std::cout << "To:      " << formatTimestamp(diff.to) << "\n";
+        std::cout << "Changed: " << (diff.changed ? "true" : "false") << "\n";
+        std::cout << "Old:     " << (diff.oldValue.has_value() ? "\"" + diff.oldValue.value() + "\"" : "(nil)") << "\n";
+        std::cout << "New:     " << (diff.newValue.has_value() ? "\"" + diff.newValue.value() + "\"" : "(nil)") << "\n";
+
+        if (diff.hasEvaluation) {
+            std::cout << "\nGuard Evaluation:\n";
+            std::cout << "Result:  " << guardResultToString(diff.evaluation.result) << "\n";
+            std::cout << "Reason:  " << diff.evaluation.reason << "\n";
+            if (!diff.evaluation.triggeredGuards.empty()) {
+                std::cout << "Guards:  ";
+                for (size_t i = 0; i < diff.evaluation.triggeredGuards.size(); ++i) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << diff.evaluation.triggeredGuards[i];
+                }
+                std::cout << "\n";
+            }
+        }
+
+        std::cout << "==========================\n\n";
     }
     
     void handleConfig(const Command& cmd) {

@@ -73,6 +73,17 @@ struct BatchPlan {
     std::vector<std::pair<std::string, std::string>> finalWrites;
 };
 
+struct DiffResult {
+    std::string key;
+    std::chrono::system_clock::time_point from;
+    std::chrono::system_clock::time_point to;
+    bool changed;
+    std::optional<std::string> oldValue;
+    std::optional<std::string> newValue;
+    bool hasEvaluation;
+    WriteEvaluation evaluation;
+};
+
 class KVStore {
 private:
     std::unordered_map<std::string, std::vector<Version>> store;
@@ -125,6 +136,11 @@ public:
     // Get value at or before a specific timestamp
     std::optional<std::string> getAtTime(const std::string& key, 
                                           std::chrono::system_clock::time_point timestamp);
+
+    // Diff a key between two timestamps with guard evaluation
+    DiffResult diffAtTime(const std::string& key,
+                          std::chrono::system_clock::time_point t1,
+                          std::chrono::system_clock::time_point t2);
     
     // Explain temporal query - shows reasoning for version selection
     ExplainResult explainGetAtTime(const std::string& key,

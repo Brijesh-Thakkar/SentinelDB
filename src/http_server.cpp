@@ -837,6 +837,58 @@ int main(int argc, char* argv[]) {
             res.set_content(json.str(), "application/json");
         }
     });
+
+    // GET /diff?key=<key>&t1=<timestamp>&t2=<timestamp> - Diff value between two times
+    svr.Get("/diff", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (!req.has_param("key") || !req.has_param("t1") || !req.has_param("t2")) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'key', 't1', or 't2' parameter\"}", "application/json");
+                return;
+            }
+
+            std::string key = req.get_param_value("key");
+            std::string t1Str = req.get_param_value("t1");
+            std::string t2Str = req.get_param_value("t2");
+
+            auto t1 = parseTimestamp(t1Str);
+            auto t2 = parseTimestamp(t2Str);
+            auto diff = kvstore->diffAtTime(key, t1, t2);
+
+            std::stringstream json;
+            json << "{\"key\":\"" << escapeJSON(diff.key)
+                 << "\",\"from\":\"" << escapeJSON(t1Str)
+                 << "\",\"to\":\"" << escapeJSON(t2Str)
+                 << "\",\"changed\":" << (diff.changed ? "true" : "false") << ",";
+
+            json << "\"old_value\":";
+            if (diff.oldValue.has_value()) {
+                json << "\"" << escapeJSON(diff.oldValue.value()) << "\"";
+            } else {
+                json << "null";
+            }
+            json << ",\"new_value\":";
+            if (diff.newValue.has_value()) {
+                json << "\"" << escapeJSON(diff.newValue.value()) << "\"";
+            } else {
+                json << "null";
+            }
+
+            if (diff.hasEvaluation) {
+                json << ",\"evaluation\":{";
+                appendWriteEvaluationJSON(json, diff.key, diff.newValue.value(), diff.evaluation);
+                json << "}";
+            }
+
+            json << "}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
     
     // GET /explain?key=<key>&timestamp=<timestamp> - Explain temporal query
     svr.Get("/explain", [kvstore](const httplib::Request& req, httplib::Response& res) {
