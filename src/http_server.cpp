@@ -996,6 +996,175 @@ int main(int argc, char* argv[]) {
             res.set_content(json.str(), "application/json");
         }
     });
+
+    // POST /plan_commit - Plan a batch of writes without committing
+    svr.Post("/plan_commit", [kvstore, MAX_BODY_SIZE, MAX_KEY_SIZE, MAX_VALUE_SIZE](const httplib::Request& req, httplib::Response& res) {
+        RequestTimer timer("/plan_commit");
+        if (req.body.size() > MAX_BODY_SIZE) {
+            Metrics::instance().recordRequest("/plan_commit", "error");
+            res.status = 413;
+            res.set_content("{\"error\":\"Request too large\"}", "application/json");
+            return;
+        }
+
+        try {
+            auto params = parseRequestJSON(req.body);
+            auto writesIt = params.find("writes");
+            if (writesIt == params.end() || !writesIt->is_array()) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'writes' array\"}", "application/json");
+                return;
+            }
+
+            std::vector<std::pair<std::string, std::string>> writes;
+            for (const auto& entry : *writesIt) {
+                if (!entry.is_object()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Each write must be an object\"}", "application/json");
+                    return;
+                }
+
+                if (entry.find("key") == entry.end() || entry.find("value") == entry.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Each write requires 'key' and 'value'\"}", "application/json");
+                    return;
+                }
+
+                std::string key = entry.at("key").get<std::string>();
+                std::string value = jsonValueToStoredString(entry.at("value"));
+
+                if (key.size() > MAX_KEY_SIZE) {
+                    Metrics::instance().recordRequest("/plan_commit", "error");
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Key too long (max 256 bytes)\"}", "application/json");
+                    return;
+                }
+                if (value.size() > MAX_VALUE_SIZE) {
+                    Metrics::instance().recordRequest("/plan_commit", "error");
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Value too large (max 1MB)\"}", "application/json");
+                    return;
+                }
+
+                writes.emplace_back(key, value);
+            }
+
+            auto plan = kvstore->planBatch(writes);
+
+            std::stringstream json;
+            json << "{\"canCommit\":" << (plan.canCommit ? "true" : "false") << ",";
+            json << "\"items\":[";
+            for (size_t i = 0; i < plan.items.size(); ++i) {
+                if (i > 0) json << ",";
+                const auto& item = plan.items[i];
+                json << "{\"key\":\"" << escapeJSON(item.key) << "\""
+                     << ",\"proposedValue\":\"" << escapeJSON(item.proposedValue) << "\""
+                     << ",\"result\":\"" << guardResultToString(item.evaluation.result) << "\""
+                     << ",\"rewritten\":" << (item.rewritten ? "true" : "false")
+                     << ",\"finalValue\":";
+                if (item.hasFinalValue) {
+                    json << "\"" << escapeJSON(item.finalValue) << "\"";
+                } else {
+                    json << "null";
+                }
+                json << ",\"evaluation\":{";
+                appendWriteEvaluationJSON(json, item.key, item.proposedValue, item.evaluation);
+                json << "}}";
+            }
+            json << "],\"finalTransaction\":[";
+            for (size_t i = 0; i < plan.finalWrites.size(); ++i) {
+                if (i > 0) json << ",";
+                const auto& write = plan.finalWrites[i];
+                json << "{\"key\":\"" << escapeJSON(write.first)
+                     << "\",\"value\":\"" << escapeJSON(write.second) << "\"}";
+            }
+            json << "]}";
+
+            Metrics::instance().recordRequest("/plan_commit", "ok");
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            Metrics::instance().recordRequest("/plan_commit", "error");
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
+
+    // POST /commit_batch - Commit a batch of writes atomically
+    svr.Post("/commit_batch", [kvstore, MAX_BODY_SIZE, MAX_KEY_SIZE, MAX_VALUE_SIZE](const httplib::Request& req, httplib::Response& res) {
+        RequestTimer timer("/commit_batch");
+        if (req.body.size() > MAX_BODY_SIZE) {
+            Metrics::instance().recordRequest("/commit_batch", "error");
+            res.status = 413;
+            res.set_content("{\"error\":\"Request too large\"}", "application/json");
+            return;
+        }
+
+        try {
+            auto params = parseRequestJSON(req.body);
+            auto writesIt = params.find("writes");
+            if (writesIt == params.end() || !writesIt->is_array()) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'writes' array\"}", "application/json");
+                return;
+            }
+
+            std::vector<std::pair<std::string, std::string>> writes;
+            for (const auto& entry : *writesIt) {
+                if (!entry.is_object()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Each write must be an object\"}", "application/json");
+                    return;
+                }
+
+                if (entry.find("key") == entry.end() || entry.find("value") == entry.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Each write requires 'key' and 'value'\"}", "application/json");
+                    return;
+                }
+
+                std::string key = entry.at("key").get<std::string>();
+                std::string value = jsonValueToStoredString(entry.at("value"));
+
+                if (key.size() > MAX_KEY_SIZE) {
+                    Metrics::instance().recordRequest("/commit_batch", "error");
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Key too long (max 256 bytes)\"}", "application/json");
+                    return;
+                }
+                if (value.size() > MAX_VALUE_SIZE) {
+                    Metrics::instance().recordRequest("/commit_batch", "error");
+                    res.status = 400;
+                    res.set_content("{\"error\":\"Value too large (max 1MB)\"}", "application/json");
+                    return;
+                }
+
+                writes.emplace_back(key, value);
+            }
+
+            Status status = kvstore->commitBatch(writes);
+            if (status != Status::OK) {
+                Metrics::instance().recordRequest("/commit_batch", "error");
+                res.status = 500;
+                res.set_content("{\"error\":\"Failed to commit batch\"}", "application/json");
+                return;
+            }
+
+            Metrics::instance().recordRequest("/commit_batch", "ok");
+            Metrics::instance().setActiveKeys(kvstore->size());
+
+            std::stringstream json;
+            json << "{\"status\":\"ok\",\"count\":" << writes.size() << "}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            Metrics::instance().recordRequest("/commit_batch", "error");
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
     
     // GET /guards - List all guards
     svr.Get("/guards", [kvstore](const httplib::Request&, httplib::Response& res) {

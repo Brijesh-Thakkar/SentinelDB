@@ -540,6 +540,98 @@ NegotiatedWriteResult KVStore::safeSet(const std::string& key, const std::string
     return result;
 }
 
+BatchPlan KVStore::planBatch(const std::vector<std::pair<std::string, std::string>>& writes) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+
+    BatchPlan plan;
+    plan.canCommit = true;
+
+    std::unordered_map<std::string, std::string> currentValues;
+    currentValues.reserve(store.size());
+    for (const auto& entry : store) {
+        if (!entry.second.empty()) {
+            currentValues[entry.first] = entry.second.back().value;
+        }
+    }
+
+    auto storeProvider = [this](const std::string& targetKey) -> std::optional<std::string> {
+        auto it = store.find(targetKey);
+        if (it != store.end() && !it->second.empty()) {
+            return it->second.back().value;
+        }
+        return std::nullopt;
+    };
+
+    auto batchProvider = [&currentValues](const std::string& targetKey) -> std::optional<std::string> {
+        auto it = currentValues.find(targetKey);
+        if (it != currentValues.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    };
+
+    for (const auto& guard : guards) {
+        guard->setValueProvider(batchProvider);
+    }
+
+    plan.items.reserve(writes.size());
+    plan.finalWrites.reserve(writes.size());
+
+    for (const auto& write : writes) {
+        PlannedWrite item;
+        item.key = write.first;
+        item.proposedValue = write.second;
+        item.rewritten = false;
+        item.hasFinalValue = false;
+
+        item.evaluation = simulateWrite(item.key, item.proposedValue);
+        applyDecisionPolicy(item.evaluation);
+
+        std::string finalValue;
+        if (item.evaluation.result == GuardResult::ACCEPT) {
+            finalValue = item.proposedValue;
+            item.hasFinalValue = true;
+        } else if (item.evaluation.result == GuardResult::COUNTER_OFFER &&
+                   !item.evaluation.alternatives.empty()) {
+            finalValue = item.evaluation.alternatives.front().value;
+            item.rewritten = finalValue != item.proposedValue;
+            item.hasFinalValue = true;
+        } else {
+            plan.canCommit = false;
+        }
+
+        if (item.hasFinalValue) {
+            item.finalValue = finalValue;
+            plan.finalWrites.emplace_back(item.key, finalValue);
+            currentValues[item.key] = finalValue;
+        } else {
+            item.finalValue.clear();
+        }
+
+        plan.items.push_back(std::move(item));
+    }
+
+    for (const auto& guard : guards) {
+        guard->setValueProvider(storeProvider);
+    }
+
+    return plan;
+}
+
+Status KVStore::commitBatch(const std::vector<std::pair<std::string, std::string>>& writes) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    Status status = Status::OK;
+
+    for (const auto& write : writes) {
+        if (setInternal(write.first, write.second) != Status::OK) {
+            status = Status::ERROR;
+            break;
+        }
+    }
+
+    return status;
+}
+
 void KVStore::addGuard(std::shared_ptr<Guard> guard) {
     // Thread safety: reader/writer lock
     std::unique_lock<std::shared_mutex> lock(rwMutex_);

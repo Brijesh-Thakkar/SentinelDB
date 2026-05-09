@@ -9,6 +9,7 @@
 #include <chrono>
 #include <list>
 #include <shared_mutex>
+#include <utility>
 #include "status.h"
 #include "wal.h"
 #include "guard.h"
@@ -55,6 +56,21 @@ struct ExplainResult {
     std::string reasoning;
     std::vector<Version> skippedVersions;
     size_t totalVersions;
+};
+
+struct PlannedWrite {
+    std::string key;
+    std::string proposedValue;
+    std::string finalValue;
+    bool hasFinalValue;
+    bool rewritten;
+    WriteEvaluation evaluation;
+};
+
+struct BatchPlan {
+    std::vector<PlannedWrite> items;
+    bool canCommit;
+    std::vector<std::pair<std::string, std::string>> finalWrites;
 };
 
 class KVStore {
@@ -149,6 +165,12 @@ public:
 
     // Atomically negotiate and commit a write using the best safe alternative
     NegotiatedWriteResult safeSet(const std::string& key, const std::string& value);
+
+    // Plan a batch of writes without committing
+    BatchPlan planBatch(const std::vector<std::pair<std::string, std::string>>& writes);
+
+    // Commit a batch of writes atomically
+    Status commitBatch(const std::vector<std::pair<std::string, std::string>>& writes);
     
     // Add a guard constraint
     void addGuard(std::shared_ptr<Guard> guard);
