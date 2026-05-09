@@ -73,6 +73,20 @@ int requireIntField(const json& body, const char* fieldName) {
     throw std::invalid_argument(std::string("'") + fieldName + "' must be an integer");
 }
 
+double requireDoubleField(const json& body, const char* fieldName) {
+    auto it = body.find(fieldName);
+    if (it == body.end()) {
+        throw std::invalid_argument(std::string("Missing '") + fieldName + "' parameter");
+    }
+    if (it->is_number()) {
+        return it->get<double>();
+    }
+    if (it->is_string()) {
+        return std::stod(it->get<std::string>());
+    }
+    throw std::invalid_argument(std::string("'") + fieldName + "' must be a number");
+}
+
 size_t requireSizeField(const json& body, const char* fieldName) {
     auto it = body.find(fieldName);
     if (it == body.end()) {
@@ -390,6 +404,41 @@ int main(int argc, char* argv[]) {
                                 } else {
                                     spdlog::info("[WAL Replay] Skipped duplicate LENGTH guard: {}", name);
                                 }
+                            } else if (guardType == "REGEX") {
+                                std::string pattern;
+                                iss >> std::quoted(pattern);
+                                if (!pattern.empty()) {
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<RegexGuard>(name, keyPattern, pattern);
+                                        kvstore->addGuard(guard);
+                                        spdlog::info("[WAL Replay] Restored REGEX guard: {}", name);
+                                    } else {
+                                        spdlog::info("[WAL Replay] Skipped duplicate REGEX guard: {}", name);
+                                    }
+                                }
+                            } else if (guardType == "RATE_CHANGE") {
+                                double maxPercent = 0.0;
+                                iss >> maxPercent;
+                                if (!kvstore->hasGuard(name)) {
+                                    guard = std::make_shared<RateChangeGuard>(name, keyPattern, maxPercent);
+                                    kvstore->addGuard(guard);
+                                    spdlog::info("[WAL Replay] Restored RATE_CHANGE guard: {}", name);
+                                } else {
+                                    spdlog::info("[WAL Replay] Skipped duplicate RATE_CHANGE guard: {}", name);
+                                }
+                            } else if (guardType == "CROSS_KEY") {
+                                std::string otherKey;
+                                double factor = 0.0;
+                                iss >> otherKey >> factor;
+                                if (!otherKey.empty()) {
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<CrossKeyGuard>(name, keyPattern, otherKey, factor);
+                                        kvstore->addGuard(guard);
+                                        spdlog::info("[WAL Replay] Restored CROSS_KEY guard: {}", name);
+                                    } else {
+                                        spdlog::info("[WAL Replay] Skipped duplicate CROSS_KEY guard: {}", name);
+                                    }
+                                }
                             }
                         } catch (const std::exception& e) {
                             spdlog::warn("[WAL Replay] Failed to restore guard {}: {}", name, e.what());
@@ -503,6 +552,41 @@ int main(int argc, char* argv[]) {
                                     spdlog::info("[WAL Replay] Restored LENGTH guard: {}", name);
                                 } else {
                                     spdlog::info("[WAL Replay] Skipped duplicate LENGTH guard: {}", name);
+                                }
+                            } else if (guardType == "REGEX") {
+                                std::string pattern;
+                                iss >> std::quoted(pattern);
+                                if (!pattern.empty()) {
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<RegexGuard>(name, keyPattern, pattern);
+                                        kvstore->addGuard(guard);
+                                        spdlog::info("[WAL Replay] Restored REGEX guard: {}", name);
+                                    } else {
+                                        spdlog::info("[WAL Replay] Skipped duplicate REGEX guard: {}", name);
+                                    }
+                                }
+                            } else if (guardType == "RATE_CHANGE") {
+                                double maxPercent = 0.0;
+                                iss >> maxPercent;
+                                if (!kvstore->hasGuard(name)) {
+                                    guard = std::make_shared<RateChangeGuard>(name, keyPattern, maxPercent);
+                                    kvstore->addGuard(guard);
+                                    spdlog::info("[WAL Replay] Restored RATE_CHANGE guard: {}", name);
+                                } else {
+                                    spdlog::info("[WAL Replay] Skipped duplicate RATE_CHANGE guard: {}", name);
+                                }
+                            } else if (guardType == "CROSS_KEY") {
+                                std::string otherKey;
+                                double factor = 0.0;
+                                iss >> otherKey >> factor;
+                                if (!otherKey.empty()) {
+                                    if (!kvstore->hasGuard(name)) {
+                                        guard = std::make_shared<CrossKeyGuard>(name, keyPattern, otherKey, factor);
+                                        kvstore->addGuard(guard);
+                                        spdlog::info("[WAL Replay] Restored CROSS_KEY guard: {}", name);
+                                    } else {
+                                        spdlog::info("[WAL Replay] Skipped duplicate CROSS_KEY guard: {}", name);
+                                    }
                                 }
                             }
                         } catch (const std::exception& e) {
@@ -948,6 +1032,9 @@ int main(int argc, char* argv[]) {
     // RANGE_INT: {"type":"RANGE_INT","name":"guard_name","keyPattern":"key*","min":"0","max":"100"}
     // ENUM:      {"type":"ENUM","name":"guard_name","keyPattern":"key*","values":"val1,val2,val3"}
     // LENGTH:    {"type":"LENGTH","name":"guard_name","keyPattern":"key*","min":"1","max":"50"}
+    // REGEX:     {"type":"REGEX","name":"guard_name","keyPattern":"key*","pattern":"^.+@.+\\..+$"}
+    // RATE:      {"type":"RATE_CHANGE","name":"guard_name","keyPattern":"key*","maxPercent":"5"}
+    // CROSS:     {"type":"CROSS_KEY","name":"guard_name","keyPattern":"key*","otherKey":"ref","factor":"1.25"}
     svr.Post("/guards", [kvstore, wal](const httplib::Request& req, httplib::Response& res) {
         try {
             auto params = parseRequestJSON(req.body);
@@ -1020,10 +1107,41 @@ int main(int argc, char* argv[]) {
                 
                 guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
                 description = "LENGTH [" + std::to_string(min) + ", " + std::to_string(max) + "] characters";
+            } else if (type == "REGEX") {
+                if (params.find("pattern") == params.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"REGEX requires 'pattern' field\"}", "application/json");
+                    return;
+                }
+
+                std::string pattern = requireStringField(params, "pattern");
+                guard = std::make_shared<RegexGuard>(name, keyPattern, pattern);
+                description = "REGEX " + pattern;
+            } else if (type == "RATE_CHANGE") {
+                if (params.find("maxPercent") == params.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"RATE_CHANGE requires 'maxPercent' field\"}", "application/json");
+                    return;
+                }
+
+                double maxPercent = requireDoubleField(params, "maxPercent");
+                guard = std::make_shared<RateChangeGuard>(name, keyPattern, maxPercent);
+                description = "RATE_CHANGE max " + std::to_string(maxPercent) + "%";
+            } else if (type == "CROSS_KEY") {
+                if (params.find("otherKey") == params.end() || params.find("factor") == params.end()) {
+                    res.status = 400;
+                    res.set_content("{\"error\":\"CROSS_KEY requires 'otherKey' and 'factor' fields\"}", "application/json");
+                    return;
+                }
+
+                std::string otherKey = requireStringField(params, "otherKey");
+                double factor = requireDoubleField(params, "factor");
+                guard = std::make_shared<CrossKeyGuard>(name, keyPattern, otherKey, factor);
+                description = "CROSS_KEY " + otherKey + " * " + std::to_string(factor);
                 
             } else {
                 res.status = 400;
-                res.set_content("{\"error\":\"Invalid guard type. Use RANGE_INT, ENUM, or LENGTH\"}", "application/json");
+                res.set_content("{\"error\":\"Invalid guard type. Use RANGE_INT, ENUM, LENGTH, REGEX, RATE_CHANGE, or CROSS_KEY\"}", "application/json");
                 return;
             }
             
@@ -1041,6 +1159,15 @@ int main(int argc, char* argv[]) {
                 } else if (type == "LENGTH") {
                     walParams = std::to_string(requireSizeField(params, "min")) + " " +
                                 std::to_string(requireSizeField(params, "max"));
+                } else if (type == "REGEX") {
+                    std::ostringstream oss;
+                    oss << std::quoted(requireStringField(params, "pattern"));
+                    walParams = oss.str();
+                } else if (type == "RATE_CHANGE") {
+                    walParams = std::to_string(requireDoubleField(params, "maxPercent"));
+                } else if (type == "CROSS_KEY") {
+                    walParams = requireStringField(params, "otherKey") + " " +
+                                std::to_string(requireDoubleField(params, "factor"));
                 }
                 
                 Status walStatus = wal->logGuardAdd(type, name, keyPattern, walParams);

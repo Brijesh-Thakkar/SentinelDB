@@ -84,11 +84,40 @@ Command CommandParser::parse(const std::string& input) {
 
 std::vector<std::string> CommandParser::tokenize(const std::string& input) {
     std::vector<std::string> tokens;
-    std::istringstream iss(input);
-    std::string token;
-    
-    while (iss >> token) {
-        tokens.push_back(token);
+    std::string current;
+    bool inQuotes = false;
+    bool escaping = false;
+
+    for (char c : input) {
+        if (escaping) {
+            current.push_back(c);
+            escaping = false;
+            continue;
+        }
+
+        if (c == '\\') {
+            escaping = true;
+            continue;
+        }
+
+        if (c == '"') {
+            inQuotes = !inQuotes;
+            continue;
+        }
+
+        if (std::isspace(static_cast<unsigned char>(c)) && !inQuotes) {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+
+        current.push_back(c);
+    }
+
+    if (!current.empty()) {
+        tokens.push_back(current);
     }
     
     return tokens;

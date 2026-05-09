@@ -294,6 +294,23 @@ private:
                     << lengthGuard->getKeyPattern() << " "
                     << lengthGuard->getMinLength() << " " << lengthGuard->getMaxLength();
                 commands.push_back(oss.str());
+            } else if (auto regexGuard = std::dynamic_pointer_cast<RegexGuard>(guard)) {
+                std::ostringstream oss;
+                oss << "GUARD ADD REGEX " << regexGuard->getName() << " "
+                    << regexGuard->getKeyPattern() << " "
+                    << std::quoted(regexGuard->getPattern());
+                commands.push_back(oss.str());
+            } else if (auto rateGuard = std::dynamic_pointer_cast<RateChangeGuard>(guard)) {
+                std::ostringstream oss;
+                oss << "GUARD ADD RATE_CHANGE " << rateGuard->getName() << " "
+                    << rateGuard->getKeyPattern() << " " << rateGuard->getMaxPercent();
+                commands.push_back(oss.str());
+            } else if (auto crossGuard = std::dynamic_pointer_cast<CrossKeyGuard>(guard)) {
+                std::ostringstream oss;
+                oss << "GUARD ADD CROSS_KEY " << crossGuard->getName() << " "
+                    << crossGuard->getKeyPattern() << " " << crossGuard->getOtherKey()
+                    << " " << crossGuard->getFactor();
+                commands.push_back(oss.str());
             }
         }
 
@@ -696,6 +713,9 @@ private:
             // GUARD ADD RANGE_INT name key min max
             // GUARD ADD ENUM name key val1,val2,val3
             // GUARD ADD LENGTH name key min max
+            // GUARD ADD REGEX name key pattern
+            // GUARD ADD RATE_CHANGE name key max_percent
+            // GUARD ADD CROSS_KEY name key other_key factor
             
             if (cmd.args.size() < 4) {
                 std::cout << "(error) ERR insufficient arguments for GUARD ADD\n";
@@ -755,10 +775,44 @@ private:
                     kvstore->addGuard(guard);
                     std::cout << "OK - Added length guard '" << name << "' for key pattern '" 
                               << keyPattern << "': [" << min << ", " << max << "] characters\n";
+                } else if (type == "REGEX") {
+                    if (cmd.args.size() < 5) {
+                        std::cout << "(error) ERR REGEX requires: name key pattern\n";
+                        return;
+                    }
+
+                    std::string pattern = cmd.args[4];
+                    auto guard = std::make_shared<RegexGuard>(name, keyPattern, pattern);
+                    kvstore->addGuard(guard);
+                    std::cout << "OK - Added regex guard '" << name << "' for key pattern '"
+                              << keyPattern << "'\n";
+                } else if (type == "RATE_CHANGE") {
+                    if (cmd.args.size() < 5) {
+                        std::cout << "(error) ERR RATE_CHANGE requires: name key max_percent\n";
+                        return;
+                    }
+
+                    double maxPercent = std::stod(cmd.args[4]);
+                    auto guard = std::make_shared<RateChangeGuard>(name, keyPattern, maxPercent);
+                    kvstore->addGuard(guard);
+                    std::cout << "OK - Added rate-change guard '" << name << "' for key pattern '"
+                              << keyPattern << "' (max " << maxPercent << "%)\n";
+                } else if (type == "CROSS_KEY") {
+                    if (cmd.args.size() < 6) {
+                        std::cout << "(error) ERR CROSS_KEY requires: name key other_key factor\n";
+                        return;
+                    }
+
+                    std::string otherKey = cmd.args[4];
+                    double factor = std::stod(cmd.args[5]);
+                    auto guard = std::make_shared<CrossKeyGuard>(name, keyPattern, otherKey, factor);
+                    kvstore->addGuard(guard);
+                    std::cout << "OK - Added cross-key guard '" << name << "' for key pattern '"
+                              << keyPattern << "' (<= " << otherKey << " * " << factor << ")\n";
                     
                 } else {
                     std::cout << "(error) ERR unknown guard type '" << type << "'\n";
-                    std::cout << "Available types: RANGE_INT, ENUM, LENGTH\n";
+                    std::cout << "Available types: RANGE_INT, ENUM, LENGTH, REGEX, RATE_CHANGE, CROSS_KEY\n";
                 }
             } catch (const std::exception& e) {
                 std::cout << "(error) ERR failed to create guard: " << e.what() << "\n";

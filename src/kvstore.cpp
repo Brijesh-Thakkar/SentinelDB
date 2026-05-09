@@ -363,7 +363,7 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
     
     for (const auto& guard : applicableGuards) {
         std::string guardReason;
-        GuardResult guardResult = guard->evaluate(value, guardReason);
+        GuardResult guardResult = guard->evaluate(key, value, guardReason);
         
         if (guardResult == GuardResult::REJECT) {
             evaluation.result = GuardResult::REJECT;
@@ -376,7 +376,7 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
             evaluation.triggeredGuards.push_back(guard->getName());
             
             // Collect alternatives from this guard
-            auto guardAlts = guard->generateAlternatives(value);
+            auto guardAlts = guard->generateAlternatives(key, value);
             for (const auto& alt : guardAlts) {
                 auto& merged = mergedAlternatives[alt.value];
                 if (merged.count == 0) {
@@ -543,6 +543,13 @@ NegotiatedWriteResult KVStore::safeSet(const std::string& key, const std::string
 void KVStore::addGuard(std::shared_ptr<Guard> guard) {
     // Thread safety: reader/writer lock
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    guard->setValueProvider([this](const std::string& targetKey) -> std::optional<std::string> {
+        auto it = store.find(targetKey);
+        if (it != store.end() && !it->second.empty()) {
+            return it->second.back().value;
+        }
+        return std::nullopt;
+    });
     guards.push_back(guard);
 }
 

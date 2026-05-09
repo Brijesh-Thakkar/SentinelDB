@@ -6,6 +6,8 @@
 #include <optional>
 #include <functional>
 #include <memory>
+#include <regex>
+#include <utility>
 
 // Decision policy for handling guard violations
 enum class DecisionPolicy {
@@ -75,10 +77,12 @@ struct NegotiatedWriteResult {
 enum class GuardType {
     RANGE_INT,      // Integer range check
     RANGE_DOUBLE,   // Double range check
-    PATTERN,        // Regex pattern match
+    REGEX,          // Regex pattern match
     ENUM_VALUES,    // Must be one of predefined values
     MIN_LENGTH,     // Minimum string length
     MAX_LENGTH,     // Maximum string length
+    RATE_CHANGE,    // Rate-of-change check
+    CROSS_KEY,      // Cross-key relationship
     CUSTOM          // Custom validation function
 };
 
@@ -88,6 +92,8 @@ protected:
     std::string name;
     std::string key;  // Key pattern this guard applies to (supports wildcards)
     bool enabled;
+    using ValueProvider = std::function<std::optional<std::string>(const std::string& key)>;
+    ValueProvider valueProvider;
     
 public:
     Guard(const std::string& n, const std::string& k)
@@ -96,10 +102,13 @@ public:
     virtual ~Guard() = default;
     
     // Evaluate if the proposed value is acceptable
-    virtual GuardResult evaluate(const std::string& proposedValue, std::string& reason) const = 0;
+    virtual GuardResult evaluate(const std::string& targetKey,
+                                 const std::string& proposedValue,
+                                 std::string& reason) const = 0;
     
     // Generate safe alternatives if rejected
-    virtual std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const = 0;
+    virtual std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                          const std::string& proposedValue) const = 0;
     
     // Check if this guard applies to a given key
     virtual bool appliesTo(const std::string& targetKey) const;
@@ -108,8 +117,17 @@ public:
     std::string getKeyPattern() const { return key; }
     bool isEnabled() const { return enabled; }
     void setEnabled(bool e) { enabled = e; }
+    void setValueProvider(ValueProvider provider) { valueProvider = std::move(provider); }
     
     virtual std::string describe() const = 0;
+
+protected:
+    std::optional<std::string> getValueForKey(const std::string& targetKey) const {
+        if (!valueProvider) {
+            return std::nullopt;
+        }
+        return valueProvider(targetKey);
+    }
 };
 
 // Integer range guard
@@ -122,8 +140,11 @@ public:
     RangeIntGuard(const std::string& name, const std::string& key, int min, int max)
         : Guard(name, key), minValue(min), maxValue(max) {}
     
-    GuardResult evaluate(const std::string& proposedValue, std::string& reason) const override;
-    std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const override;
+    GuardResult evaluate(const std::string& targetKey,
+                         const std::string& proposedValue,
+                         std::string& reason) const override;
+    std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                  const std::string& proposedValue) const override;
     std::string describe() const override;
     int getMinValue() const { return minValue; }
     int getMaxValue() const { return maxValue; }
@@ -139,8 +160,11 @@ public:
               const std::vector<std::string>& values)
         : Guard(name, key), allowedValues(values) {}
     
-    GuardResult evaluate(const std::string& proposedValue, std::string& reason) const override;
-    std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const override;
+    GuardResult evaluate(const std::string& targetKey,
+                         const std::string& proposedValue,
+                         std::string& reason) const override;
+    std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                  const std::string& proposedValue) const override;
     std::string describe() const override;
     const std::vector<std::string>& getAllowedValues() const { return allowedValues; }
 };
@@ -156,11 +180,72 @@ public:
                 size_t min, size_t max)
         : Guard(name, key), minLength(min), maxLength(max) {}
     
-    GuardResult evaluate(const std::string& proposedValue, std::string& reason) const override;
-    std::vector<Alternative> generateAlternatives(const std::string& proposedValue) const override;
+    GuardResult evaluate(const std::string& targetKey,
+                         const std::string& proposedValue,
+                         std::string& reason) const override;
+    std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                  const std::string& proposedValue) const override;
     std::string describe() const override;
     size_t getMinLength() const { return minLength; }
     size_t getMaxLength() const { return maxLength; }
+};
+
+// Regex pattern guard
+class RegexGuard : public Guard {
+private:
+    std::string pattern;
+    std::regex compiled;
+
+public:
+    RegexGuard(const std::string& name, const std::string& key, const std::string& regexPattern)
+        : Guard(name, key), pattern(regexPattern), compiled(regexPattern) {}
+
+    GuardResult evaluate(const std::string& targetKey,
+                         const std::string& proposedValue,
+                         std::string& reason) const override;
+    std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                  const std::string& proposedValue) const override;
+    std::string describe() const override;
+    const std::string& getPattern() const { return pattern; }
+};
+
+// Rate-of-change guard
+class RateChangeGuard : public Guard {
+private:
+    double maxPercent;
+
+public:
+    RateChangeGuard(const std::string& name, const std::string& key, double maxPercentDelta)
+        : Guard(name, key), maxPercent(maxPercentDelta) {}
+
+    GuardResult evaluate(const std::string& targetKey,
+                         const std::string& proposedValue,
+                         std::string& reason) const override;
+    std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                  const std::string& proposedValue) const override;
+    std::string describe() const override;
+    double getMaxPercent() const { return maxPercent; }
+};
+
+// Cross-key guard
+class CrossKeyGuard : public Guard {
+private:
+    std::string otherKey;
+    double factor;
+
+public:
+    CrossKeyGuard(const std::string& name, const std::string& key,
+                  const std::string& otherKeyName, double multiplier)
+        : Guard(name, key), otherKey(otherKeyName), factor(multiplier) {}
+
+    GuardResult evaluate(const std::string& targetKey,
+                         const std::string& proposedValue,
+                         std::string& reason) const override;
+    std::vector<Alternative> generateAlternatives(const std::string& targetKey,
+                                                  const std::string& proposedValue) const override;
+    std::string describe() const override;
+    const std::string& getOtherKey() const { return otherKey; }
+    double getFactor() const { return factor; }
 };
 
 #endif // GUARD_H
