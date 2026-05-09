@@ -103,18 +103,21 @@ std::optional<std::string> KVStore::getAtTime(const std::string& key,
     
     // Find the latest version at or before the given timestamp
     const auto& versions = it->second;
-    std::optional<std::string> result;
-    
-    for (const auto& version : versions) {
-        if (version.timestamp <= timestamp) {
-            result = version.value;
-        } else {
-            // Versions are in chronological order, so we can stop
-            break;
+
+    auto upper = std::upper_bound(
+        versions.begin(),
+        versions.end(),
+        timestamp,
+        [](const auto& ts, const Version& version) {
+            return ts < version.timestamp;
         }
+    );
+
+    if (upper == versions.begin()) {
+        return std::nullopt;
     }
-    
-    return result;
+
+    return std::prev(upper)->value;
 }
 
 ExplainResult KVStore::explainGetAtTime(const std::string& key,
