@@ -197,6 +197,70 @@ void appendWriteEvaluationJSON(std::stringstream& json, const std::string& key,
     json << "]";
 }
 
+void appendGuardLearningSnapshotJSON(std::stringstream& json, const GuardLearningSnapshot& snapshot) {
+    json << "\"key\":\"" << escapeJSON(snapshot.key) << "\",";
+    json << "\"learningActive\":" << (snapshot.learningActive ? "true" : "false") << ",";
+    json << "\"minWritesThreshold\":" << snapshot.minWritesThreshold << ",";
+    json << "\"observedWrites\":" << snapshot.totalWrites << ",";
+    json << "\"numericWrites\":" << snapshot.numericWrites << ",";
+    json << "\"distinctValues\":" << snapshot.distinctValues << ",";
+
+    json << "\"observedMin\":";
+    if (snapshot.observedMin.has_value()) {
+        json << snapshot.observedMin.value();
+    } else {
+        json << "null";
+    }
+    json << ",\"observedMax\":";
+    if (snapshot.observedMax.has_value()) {
+        json << snapshot.observedMax.value();
+    } else {
+        json << "null";
+    }
+
+    json << ",\"commonPrefixes\":[";
+    for (size_t i = 0; i < snapshot.commonPrefixes.size(); ++i) {
+        if (i > 0) json << ",";
+        json << "{\"prefix\":\"" << escapeJSON(snapshot.commonPrefixes[i].first)
+             << "\",\"count\":" << snapshot.commonPrefixes[i].second << "}";
+    }
+    json << "],\"suggestions\":[";
+
+    for (size_t i = 0; i < snapshot.suggestions.size(); ++i) {
+        if (i > 0) json << ",";
+        const auto& suggestion = snapshot.suggestions[i];
+        json << "{\"type\":\"" << escapeJSON(suggestion.type)
+             << "\",\"recommendation\":\"" << escapeJSON(suggestion.recommendation)
+             << "\",\"confidence\":" << formatConfidence(suggestion.confidence)
+             << ",\"supportingWrites\":" << suggestion.supportingWrites
+             << ",\"suggestedMin\":";
+        if (suggestion.suggestedMin.has_value()) {
+            json << suggestion.suggestedMin.value();
+        } else {
+            json << "null";
+        }
+        json << ",\"suggestedMax\":";
+        if (suggestion.suggestedMax.has_value()) {
+            json << suggestion.suggestedMax.value();
+        } else {
+            json << "null";
+        }
+        json << ",\"prefix\":";
+        if (suggestion.prefix.has_value()) {
+            json << "\"" << escapeJSON(suggestion.prefix.value()) << "\"";
+        } else {
+            json << "null";
+        }
+        json << ",\"enumValues\":[";
+        for (size_t j = 0; j < suggestion.enumValues.size(); ++j) {
+            if (j > 0) json << ",";
+            json << "\"" << escapeJSON(suggestion.enumValues[j]) << "\"";
+        }
+        json << "]}";
+    }
+    json << "]";
+}
+
 // Helper function to escape JSON strings
 std::string escapeJSON(const std::string& str) {
     std::string result;
@@ -962,6 +1026,44 @@ int main(int argc, char* argv[]) {
             }
 
             json << "]}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
+
+    // GET /suggest_guards?key=<key>[&minWrites=<n>] - Learned guard recommendations in DEV_FRIENDLY mode
+    svr.Get("/suggest_guards", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (!req.has_param("key")) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'key' parameter\"}", "application/json");
+                return;
+            }
+
+            std::string key = req.get_param_value("key");
+            size_t minWrites = 0;
+            if (req.has_param("minWrites")) {
+                std::string minWritesStr = req.get_param_value("minWrites");
+                size_t pos = 0;
+                minWrites = std::stoul(minWritesStr, &pos);
+                if (pos != minWritesStr.size()) {
+                    throw std::invalid_argument("minWrites must be an integer");
+                }
+                if (minWrites == 0) {
+                    throw std::invalid_argument("minWrites must be positive");
+                }
+            }
+
+            auto snapshot = kvstore->getGuardSuggestions(key, minWrites);
+
+            std::stringstream json;
+            json << "{";
+            appendGuardLearningSnapshotJSON(json, snapshot);
+            json << "}";
             res.set_content(json.str(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;

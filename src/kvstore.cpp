@@ -1,6 +1,8 @@
 #include "kvstore.h"
 #include "logger.h"
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <sstream>
 #include <mutex>
 #include <shared_mutex>
@@ -27,6 +29,66 @@ std::string joinStrings(const std::vector<std::string>& values, char separator) 
         oss << values[i];
     }
     return oss.str();
+}
+
+std::optional<long long> parseIntegerStrict(const std::string& value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    size_t pos = 0;
+    try {
+        long long parsed = std::stoll(value, &pos);
+        if (pos != value.size()) {
+            return std::nullopt;
+        }
+        return parsed;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::string formatPercentage(size_t numerator, size_t denominator) {
+    if (denominator == 0) {
+        return "0";
+    }
+
+    std::ostringstream oss;
+    double percentage = (static_cast<double>(numerator) * 100.0) / static_cast<double>(denominator);
+    oss.setf(std::ios::fixed);
+    oss.precision(1);
+    oss << percentage;
+    std::string result = oss.str();
+    while (!result.empty() && result.back() == '0') {
+        result.pop_back();
+    }
+    if (!result.empty() && result.back() == '.') {
+        result.pop_back();
+    }
+    return result;
+}
+
+std::pair<long long, long long> smallestCoveringWindow(std::vector<long long> values, size_t coverageCount) {
+    std::sort(values.begin(), values.end());
+    if (values.empty()) {
+        return {0, 0};
+    }
+    if (coverageCount == 0 || coverageCount >= values.size()) {
+        return {values.front(), values.back()};
+    }
+
+    size_t bestStart = 0;
+    long long bestWidth = std::numeric_limits<long long>::max();
+    for (size_t start = 0; start + coverageCount - 1 < values.size(); ++start) {
+        size_t end = start + coverageCount - 1;
+        long long width = values[end] - values[start];
+        if (width < bestWidth) {
+            bestWidth = width;
+            bestStart = start;
+        }
+    }
+
+    return {values[bestStart], values[bestStart + coverageCount - 1]};
 }
 }
 
@@ -60,6 +122,10 @@ Status KVStore::setInternal(const std::string& key, const std::string& value) {
 
     touchKey(key);
     evictIfNeeded();
+
+    if (decisionPolicy == DecisionPolicy::DEV_FRIENDLY) {
+        recordLearningObservation(key, value);
+    }
     
     return Status::OK;
 }
@@ -700,6 +766,155 @@ void KVStore::appendAuditEvent(const std::string& key,
     }
 }
 
+void KVStore::recordLearningObservation(const std::string& key, const std::string& value) {
+    auto& stats = learnedStats_[key];
+    stats.totalWrites++;
+    stats.valueCounts[value]++;
+
+    const size_t maxPrefixLength = std::min<size_t>(12, value.size());
+    for (size_t length = 3; length <= maxPrefixLength; ++length) {
+        stats.prefixCounts[value.substr(0, length)]++;
+    }
+
+    auto numericValue = parseIntegerStrict(value);
+    if (!numericValue.has_value()) {
+        return;
+    }
+
+    stats.numericWrites++;
+    stats.numericSamples.push_back(numericValue.value());
+    if (!stats.observedMin.has_value() || numericValue.value() < stats.observedMin.value()) {
+        stats.observedMin = numericValue.value();
+    }
+    if (!stats.observedMax.has_value() || numericValue.value() > stats.observedMax.value()) {
+        stats.observedMax = numericValue.value();
+    }
+}
+
+GuardLearningSnapshot KVStore::buildGuardLearningSnapshotUnlocked(const std::string& key,
+                                                                 size_t minWrites) const {
+    GuardLearningSnapshot snapshot;
+    snapshot.key = key;
+    snapshot.learningActive = (decisionPolicy == DecisionPolicy::DEV_FRIENDLY);
+    snapshot.minWritesThreshold = (minWrites == 0 ? guardLearningMinWrites_ : minWrites);
+    snapshot.totalWrites = 0;
+    snapshot.numericWrites = 0;
+    snapshot.distinctValues = 0;
+
+    auto it = learnedStats_.find(key);
+    if (it == learnedStats_.end()) {
+        return snapshot;
+    }
+
+    const auto& stats = it->second;
+    snapshot.totalWrites = stats.totalWrites;
+    snapshot.numericWrites = stats.numericWrites;
+    snapshot.distinctValues = stats.valueCounts.size();
+    snapshot.observedMin = stats.observedMin;
+    snapshot.observedMax = stats.observedMax;
+
+    std::vector<std::pair<std::string, size_t>> prefixes;
+    prefixes.reserve(stats.prefixCounts.size());
+    for (const auto& entry : stats.prefixCounts) {
+        if (entry.second >= 2) {
+            prefixes.push_back(entry);
+        }
+    }
+    std::sort(prefixes.begin(), prefixes.end(),
+              [](const auto& left, const auto& right) {
+                  if (left.second != right.second) {
+                      return left.second > right.second;
+                  }
+                  if (left.first.size() != right.first.size()) {
+                      return left.first.size() > right.first.size();
+                  }
+                  return left.first < right.first;
+              });
+    for (const auto& entry : prefixes) {
+        if (snapshot.commonPrefixes.size() == 5) {
+            break;
+        }
+        if (entry.second * 100 < std::max<size_t>(1, stats.totalWrites) * 60) {
+            continue;
+        }
+        snapshot.commonPrefixes.push_back(entry);
+    }
+
+    if (stats.totalWrites < snapshot.minWritesThreshold) {
+        return snapshot;
+    }
+
+    if (stats.numericWrites >= snapshot.minWritesThreshold && !stats.numericSamples.empty()) {
+        const size_t coverageCount = std::max<size_t>(
+            1, static_cast<size_t>(std::ceil(static_cast<double>(stats.numericSamples.size()) * 0.95)));
+        auto [windowMin, windowMax] = smallestCoveringWindow(stats.numericSamples, coverageCount);
+
+        GuardSuggestion suggestion;
+        suggestion.type = "RANGE_INT";
+        suggestion.confidence = static_cast<double>(coverageCount) /
+                                static_cast<double>(std::max<size_t>(1, stats.totalWrites));
+        suggestion.supportingWrites = coverageCount;
+        suggestion.suggestedMin = windowMin;
+        suggestion.suggestedMax = windowMax;
+        suggestion.recommendation = formatPercentage(coverageCount, stats.totalWrites) +
+            "% of values were between " + std::to_string(windowMin) + " and " +
+            std::to_string(windowMax) + ", consider RANGE " +
+            std::to_string(windowMin) + " " + std::to_string(windowMax);
+        snapshot.suggestions.push_back(std::move(suggestion));
+    }
+
+    if (!stats.valueCounts.empty() && stats.valueCounts.size() <= 5) {
+        GuardSuggestion suggestion;
+        suggestion.type = "ENUM";
+        suggestion.confidence = 1.0;
+        suggestion.supportingWrites = stats.totalWrites;
+
+        std::vector<std::pair<std::string, size_t>> orderedValues(stats.valueCounts.begin(), stats.valueCounts.end());
+        std::sort(orderedValues.begin(), orderedValues.end(),
+                  [](const auto& left, const auto& right) {
+                      if (left.second != right.second) {
+                          return left.second > right.second;
+                      }
+                      return left.first < right.first;
+                  });
+
+        std::vector<std::string> enumValues;
+        enumValues.reserve(orderedValues.size());
+        for (const auto& entry : orderedValues) {
+            enumValues.push_back(entry.first);
+        }
+        suggestion.enumValues = enumValues;
+        suggestion.recommendation = "Observed " + std::to_string(stats.valueCounts.size()) +
+            " distinct values across " + std::to_string(stats.totalWrites) +
+            " writes, consider ENUM {" + joinStrings(enumValues, ',') + "}";
+        snapshot.suggestions.push_back(std::move(suggestion));
+    }
+
+    if (!snapshot.commonPrefixes.empty()) {
+        const auto& bestPrefix = snapshot.commonPrefixes.front();
+        GuardSuggestion suggestion;
+        suggestion.type = "PATTERN";
+        suggestion.confidence = static_cast<double>(bestPrefix.second) /
+                                static_cast<double>(std::max<size_t>(1, stats.totalWrites));
+        suggestion.supportingWrites = bestPrefix.second;
+        suggestion.prefix = bestPrefix.first;
+        suggestion.recommendation = formatPercentage(bestPrefix.second, stats.totalWrites) +
+            "% of values started with '" + bestPrefix.first +
+            "', consider PATTERN ^" + bestPrefix.first + ".*";
+        snapshot.suggestions.push_back(std::move(suggestion));
+    }
+
+    std::sort(snapshot.suggestions.begin(), snapshot.suggestions.end(),
+              [](const GuardSuggestion& left, const GuardSuggestion& right) {
+                  if (left.confidence != right.confidence) {
+                      return left.confidence > right.confidence;
+                  }
+                  return left.type < right.type;
+              });
+
+    return snapshot;
+}
+
 WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& value) {
     // Thread safety: reader/writer lock
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
@@ -939,6 +1154,21 @@ DecisionPolicy KVStore::getDecisionPolicy() const {
     // Thread safety: reader/writer lock
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return decisionPolicy;
+}
+
+void KVStore::setGuardLearningMinWrites(size_t minWrites) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    guardLearningMinWrites_ = std::max<size_t>(1, minWrites);
+}
+
+size_t KVStore::getGuardLearningMinWrites() const {
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
+    return guardLearningMinWrites_;
+}
+
+GuardLearningSnapshot KVStore::getGuardSuggestions(const std::string& key, size_t minWrites) const {
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
+    return buildGuardLearningSnapshotUnlocked(key, minWrites);
 }
 
 std::vector<AuditEvent> KVStore::getAuditEvents(

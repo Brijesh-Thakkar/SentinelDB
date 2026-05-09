@@ -117,9 +117,44 @@ struct RollbackResult {
     WriteEvaluation evaluation;
 };
 
+struct GuardSuggestion {
+    std::string type;
+    std::string recommendation;
+    double confidence;
+    size_t supportingWrites;
+    std::optional<long long> suggestedMin;
+    std::optional<long long> suggestedMax;
+    std::vector<std::string> enumValues;
+    std::optional<std::string> prefix;
+};
+
+struct GuardLearningSnapshot {
+    std::string key;
+    bool learningActive;
+    size_t minWritesThreshold;
+    size_t totalWrites;
+    size_t numericWrites;
+    size_t distinctValues;
+    std::optional<long long> observedMin;
+    std::optional<long long> observedMax;
+    std::vector<std::pair<std::string, size_t>> commonPrefixes;
+    std::vector<GuardSuggestion> suggestions;
+};
+
 class KVStore {
 private:
+    struct KeyLearningStats {
+        size_t totalWrites{0};
+        size_t numericWrites{0};
+        std::optional<long long> observedMin;
+        std::optional<long long> observedMax;
+        std::unordered_map<std::string, size_t> valueCounts;
+        std::unordered_map<std::string, size_t> prefixCounts;
+        std::vector<long long> numericSamples;
+    };
+
     std::unordered_map<std::string, std::vector<Version>> store;
+    std::unordered_map<std::string, KeyLearningStats> learnedStats_;
     std::shared_ptr<WAL> wal;
     bool walEnabled;
     RetentionPolicy retentionPolicy;
@@ -127,6 +162,7 @@ private:
     DecisionPolicy decisionPolicy;  // Active decision policy for guard violations
     mutable std::shared_mutex rwMutex_;
     std::deque<AuditEvent> auditLog_;
+    size_t guardLearningMinWrites_{10};
 
     // Internal set implementation for already-locked callers
     Status setInternal(const std::string& key, const std::string& value);
@@ -155,6 +191,13 @@ private:
                           const std::string& originalValue,
                           const WriteEvaluation& evaluation,
                           const std::optional<std::string>& finalValue);
+
+    // Track observed values while guard learning mode is active
+    void recordLearningObservation(const std::string& key, const std::string& value);
+
+    // Build a suggestion snapshot for a key (caller must hold lock)
+    GuardLearningSnapshot buildGuardLearningSnapshotUnlocked(const std::string& key,
+                                                            size_t minWrites) const;
 
 public:
     // Constructor with optional WAL
@@ -261,6 +304,13 @@ public:
     
     // Get current decision policy
     DecisionPolicy getDecisionPolicy() const;
+
+    // Configure minimum sample size before guard suggestions are emitted
+    void setGuardLearningMinWrites(size_t minWrites);
+    size_t getGuardLearningMinWrites() const;
+
+    // Retrieve learned guard recommendations for a key
+    GuardLearningSnapshot getGuardSuggestions(const std::string& key, size_t minWrites = 0) const;
 };
 
 #endif // KVSTORE_H

@@ -137,23 +137,50 @@ assert_status "$response" 200
 assert_contains "$response" '"status":"ok"'
 
 echo "Test 11: /policy accepts valid JSON"
+response="$(request POST /policy '{"policy":"DEV_FRIENDLY"}')"
+assert_status "$response" 200
+assert_contains "$response" '"activePolicy":"DEV_FRIENDLY"'
+
+echo "Test 12: DEV_FRIENDLY learning mode suggests a numeric range guard"
+for value in 12 18 24 30 36 42 48 54 60 66; do
+    response="$(request POST /set "{\"key\":\"learned_score\",\"value\":\"$value\"}")"
+    assert_status "$response" 200
+done
+response="$(request GET '/suggest_guards?key=learned_score&minWrites=10')"
+assert_status "$response" 200
+assert_contains "$response" '"type":"RANGE_INT"'
+assert_contains "$response" '"suggestedMin":12'
+assert_contains "$response" '"suggestedMax":66'
+assert_contains "$response" '"observedWrites":10'
+
+echo "Test 13: DEV_FRIENDLY learning mode surfaces common prefixes"
+for value in order-a1 order-b2 order-c3 order-d4 order-e5; do
+    response="$(request POST /set "{\"key\":\"learned_prefix\",\"value\":\"$value\"}")"
+    assert_status "$response" 200
+done
+response="$(request GET '/suggest_guards?key=learned_prefix&minWrites=5')"
+assert_status "$response" 200
+assert_contains "$response" '"type":"PATTERN"'
+assert_contains "$response" '"prefix":"order-"'
+
+echo "Test 14: STRICT policy can still be enabled"
 response="$(request POST /policy '{"policy":"STRICT"}')"
 assert_status "$response" 200
 assert_contains "$response" '"activePolicy":"STRICT"'
 
-echo "Test 12: STRICT /safe_set rejects without committing"
+echo "Test 15: STRICT /safe_set rejects without committing"
 response="$(request POST /safe_set '{"key":"score","value":"150"}')"
 assert_status "$response" 409
 assert_contains "$response" '"result":"REJECT"'
 assert_contains "$response" '"committed":false'
 assert_contains "$response" '"storedValue":null'
 
-echo "Test 13: malformed JSON is rejected"
+echo "Test 16: malformed JSON is rejected"
 response="$(request POST /set '{"key":"broken","value":}')"
 assert_status "$response" 400
 assert_contains "$response" 'Invalid request'
 
-echo "Test 14: values with spaces and nested JSON survive restart"
+echo "Test 17: values with spaces and nested JSON survive restart"
 stop_server
 start_server
 
