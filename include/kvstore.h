@@ -96,6 +96,15 @@ struct AuditEvent {
     std::string outcome;
 };
 
+struct SimulationResult {
+    std::string key;
+    std::chrono::system_clock::time_point timestamp;
+    std::string proposedValue;
+    std::vector<std::string> guardsConsidered;
+    DecisionPolicy policyUsed;
+    WriteEvaluation evaluation;
+};
+
 struct RollbackResult {
     std::string key;
     std::chrono::system_clock::time_point targetTimestamp;
@@ -180,6 +189,11 @@ public:
     // Retrieve audit events for a key since an optional timestamp
     std::vector<AuditEvent> getAuditEvents(const std::string& key,
                                            const std::optional<std::chrono::system_clock::time_point>& since) const;
+
+    // Simulate a write at a historical timestamp using historical guards
+    SimulationResult simulateAtTime(const std::string& key,
+                                    const std::string& value,
+                                    std::chrono::system_clock::time_point timestamp);
     
     // Explain temporal query - shows reasoning for version selection
     ExplainResult explainGetAtTime(const std::string& key,

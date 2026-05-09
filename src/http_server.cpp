@@ -902,22 +902,29 @@ int main(int argc, char* argv[]) {
     // GET /audit?key=<key>&since=<timestamp> - Audit log for negotiated writes
     svr.Get("/audit", [kvstore](const httplib::Request& req, httplib::Response& res) {
         try {
-            if (!req.has_param("key") || !req.has_param("since")) {
+            if (!req.has_param("key")) {
                 res.status = 400;
-                res.set_content("{\"error\":\"Missing 'key' or 'since' parameter\"}", "application/json");
+                res.set_content("{\"error\":\"Missing 'key' parameter\"}", "application/json");
                 return;
             }
 
             std::string key = req.get_param_value("key");
-            std::string sinceStr = req.get_param_value("since");
-            auto since = parseTimestamp(sinceStr);
-            std::optional<std::chrono::system_clock::time_point> sinceOpt = since;
+            std::optional<std::chrono::system_clock::time_point> sinceOpt;
+            std::string sinceStr;
+            if (req.has_param("since")) {
+                sinceStr = req.get_param_value("since");
+                auto since = parseTimestamp(sinceStr);
+                sinceOpt = since;
+            }
 
             auto events = kvstore->getAuditEvents(key, sinceOpt);
 
             std::stringstream json;
-            json << "{\"key\":\"" << escapeJSON(key) << "\",\"since\":\""
-                 << escapeJSON(sinceStr) << "\",\"events\":[";
+            json << "{\"key\":\"" << escapeJSON(key) << "\"";
+            if (!sinceStr.empty()) {
+                json << ",\"since\":\"" << escapeJSON(sinceStr) << "\"";
+            }
+            json << ",\"events\":[";
 
             for (size_t i = 0; i < events.size(); ++i) {
                 if (i > 0) json << ",";
@@ -955,6 +962,57 @@ int main(int argc, char* argv[]) {
             }
 
             json << "]}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
+
+    // GET /simulate_at?key=<key>&timestamp=<ts>&value=<value> - Simulate historical guard outcome
+    svr.Get("/simulate_at", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (!req.has_param("key") || !req.has_param("timestamp") || !req.has_param("value")) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'key', 'timestamp', or 'value' parameter\"}", "application/json");
+                return;
+            }
+
+            std::string key = req.get_param_value("key");
+            std::string timestampStr = req.get_param_value("timestamp");
+            std::string value = req.get_param_value("value");
+
+            auto timestamp = parseTimestamp(timestampStr);
+            auto simulation = kvstore->simulateAtTime(key, value, timestamp);
+
+            std::string outcome = "pass";
+            if (simulation.evaluation.result == GuardResult::REJECT) {
+                outcome = "reject";
+            } else if (simulation.evaluation.result == GuardResult::COUNTER_OFFER &&
+                       !simulation.evaluation.alternatives.empty()) {
+                outcome = "rewrite";
+            }
+
+            std::stringstream json;
+            json << "{\"key\":\"" << escapeJSON(simulation.key)
+                 << "\",\"timestamp\":\"" << escapeJSON(timestampStr)
+                 << "\",\"value\":\"" << escapeJSON(simulation.proposedValue)
+                 << "\",\"outcome\":\"" << outcome << "\""
+                 << ",\"policy_used\":\"" << escapeJSON(decisionPolicyToString(simulation.policyUsed)) << "\"";
+
+            json << ",\"guards\":[";
+            for (size_t i = 0; i < simulation.guardsConsidered.size(); ++i) {
+                if (i > 0) json << ",";
+                json << "\"" << escapeJSON(simulation.guardsConsidered[i]) << "\"";
+            }
+            json << "]";
+
+            json << ",\"evaluation\":{";
+            appendWriteEvaluationJSON(json, simulation.key, simulation.proposedValue, simulation.evaluation);
+            json << "}}";
+
             res.set_content(json.str(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;

@@ -959,3 +959,213 @@ std::vector<AuditEvent> KVStore::getAuditEvents(
 
     return events;
 }
+
+SimulationResult KVStore::simulateAtTime(const std::string& key,
+                                         const std::string& value,
+                                         std::chrono::system_clock::time_point timestamp) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    SimulationResult result;
+    result.key = key;
+    result.timestamp = timestamp;
+    result.proposedValue = value;
+
+    std::vector<std::string> historicalGuards;
+    DecisionPolicy historicalPolicy = decisionPolicy;
+    bool policyFound = false;
+
+    for (const auto& event : auditLog_) {
+        if (event.timestamp > timestamp) {
+            continue;
+        }
+        if (!event.guardsFired.empty()) {
+            for (const auto& guardName : event.guardsFired) {
+                if (std::find(historicalGuards.begin(), historicalGuards.end(), guardName) == historicalGuards.end()) {
+                    historicalGuards.push_back(guardName);
+                }
+            }
+        }
+        historicalPolicy = event.policyUsed;
+        policyFound = true;
+    }
+
+    if (!policyFound) {
+        historicalPolicy = decisionPolicy;
+    }
+
+    auto getValueAt = [&](const std::string& targetKey, std::chrono::system_clock::time_point ts)
+        -> std::optional<std::string> {
+        auto it = store.find(targetKey);
+        if (it == store.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+
+        const auto& versions = it->second;
+        auto upper = std::upper_bound(
+            versions.begin(),
+            versions.end(),
+            ts,
+            [](const auto& timepoint, const Version& version) {
+                return timepoint < version.timestamp;
+            }
+        );
+
+        if (upper == versions.begin()) {
+            return std::nullopt;
+        }
+
+        return std::prev(upper)->value;
+    };
+
+    auto storeProvider = [this](const std::string& targetKey) -> std::optional<std::string> {
+        auto it = store.find(targetKey);
+        if (it != store.end() && !it->second.empty()) {
+            return it->second.back().value;
+        }
+        return std::nullopt;
+    };
+
+    auto timeProvider = [&](const std::string& targetKey) -> std::optional<std::string> {
+        return getValueAt(targetKey, timestamp);
+    };
+
+    std::vector<std::shared_ptr<Guard>> guardsToUse;
+    for (const auto& guard : guards) {
+        if (!guard->isEnabled() || !guard->appliesTo(key)) {
+            continue;
+        }
+        if (historicalGuards.empty()) {
+            continue;
+        }
+        if (std::find(historicalGuards.begin(), historicalGuards.end(), guard->getName()) == historicalGuards.end()) {
+            continue;
+        }
+        guardsToUse.push_back(guard);
+    }
+
+    result.guardsConsidered.reserve(guardsToUse.size());
+    for (const auto& guard : guardsToUse) {
+        result.guardsConsidered.push_back(guard->getName());
+        guard->setValueProvider(timeProvider);
+    }
+
+    WriteEvaluation evaluation;
+    evaluation.key = key;
+    evaluation.proposedValue = value;
+    evaluation.result = GuardResult::ACCEPT;
+
+    if (guardsToUse.empty()) {
+        evaluation.reason = "No historical guards available for timestamp";
+    } else {
+        bool allAccepted = true;
+
+        struct MergedAlternative {
+            std::string altValue;
+            double confidenceSum{0.0};
+            size_t count{0};
+            RiskLevel risk{RiskLevel::LOW};
+            std::vector<std::string> reasons;
+        };
+
+        auto riskRank = [](RiskLevel level) {
+            switch (level) {
+                case RiskLevel::LOW: return 0;
+                case RiskLevel::MEDIUM: return 1;
+                case RiskLevel::HIGH: return 2;
+            }
+            return 2;
+        };
+
+        auto maxRisk = [&](RiskLevel left, RiskLevel right) {
+            return riskRank(left) >= riskRank(right) ? left : right;
+        };
+
+        std::unordered_map<std::string, MergedAlternative> mergedAlternatives;
+
+        for (const auto& guard : guardsToUse) {
+            std::string guardReason;
+            GuardResult guardResult = guard->evaluate(key, value, guardReason);
+
+            if (guardResult == GuardResult::REJECT) {
+                evaluation.result = GuardResult::REJECT;
+                evaluation.triggeredGuards.push_back(guard->getName());
+                evaluation.reason = guardReason;
+                break;
+            } else if (guardResult == GuardResult::COUNTER_OFFER) {
+                allAccepted = false;
+                evaluation.triggeredGuards.push_back(guard->getName());
+                auto guardAlts = guard->generateAlternatives(key, value);
+                for (const auto& alt : guardAlts) {
+                    auto& merged = mergedAlternatives[alt.value];
+                    if (merged.count == 0) {
+                        merged.altValue = alt.value;
+                        merged.risk = alt.risk;
+                    } else {
+                        merged.risk = maxRisk(merged.risk, alt.risk);
+                    }
+                    merged.confidenceSum += alt.confidence;
+                    merged.count += 1;
+                    merged.reasons.push_back(guard->getName() + ": " + alt.reason);
+                }
+
+                if (evaluation.reason.empty()) {
+                    evaluation.reason = guardReason;
+                } else {
+                    evaluation.reason += "; " + guardReason;
+                }
+            }
+        }
+
+        if (evaluation.result != GuardResult::REJECT) {
+            if (!allAccepted) {
+                evaluation.result = GuardResult::COUNTER_OFFER;
+                evaluation.alternatives.clear();
+                evaluation.alternatives.reserve(mergedAlternatives.size());
+                for (const auto& entry : mergedAlternatives) {
+                    const auto& merged = entry.second;
+                    double confidence = merged.count > 0 ? merged.confidenceSum / static_cast<double>(merged.count) : 0.0;
+                    std::string reason;
+                    for (size_t i = 0; i < merged.reasons.size(); ++i) {
+                        if (i > 0) {
+                            reason += "; ";
+                        }
+                        reason += merged.reasons[i];
+                    }
+                    evaluation.alternatives.emplace_back(
+                        merged.altValue,
+                        confidence,
+                        merged.risk,
+                        reason.empty() ? "Guard-proposed alternative" : reason
+                    );
+                }
+
+                std::sort(evaluation.alternatives.begin(), evaluation.alternatives.end(),
+                          [&](const Alternative& left, const Alternative& right) {
+                    if (left.confidence != right.confidence) {
+                        return left.confidence > right.confidence;
+                    }
+                    int leftRisk = riskRank(left.risk);
+                    int rightRisk = riskRank(right.risk);
+                    if (leftRisk != rightRisk) {
+                        return leftRisk < rightRisk;
+                    }
+                    return left.value < right.value;
+                });
+            } else {
+                evaluation.reason = "All guards passed";
+            }
+        }
+    }
+
+    auto priorPolicy = decisionPolicy;
+    decisionPolicy = historicalPolicy;
+    applyDecisionPolicy(evaluation);
+    decisionPolicy = priorPolicy;
+
+    for (const auto& guard : guardsToUse) {
+        guard->setValueProvider(storeProvider);
+    }
+
+    result.evaluation = evaluation;
+    result.policyUsed = historicalPolicy;
+    return result;
+}
