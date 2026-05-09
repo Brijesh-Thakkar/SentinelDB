@@ -55,6 +55,23 @@ Command CommandParser::parse(const std::string& input) {
             return cmd;
         }
     }
+
+    // Special case: ROLLBACK key TO timestamp
+    if (tokens.size() >= 4 && getCommandType(tokens[0]) == CommandType::ROLLBACK) {
+        std::string toToken = tokens[2];
+        std::transform(toToken.begin(), toToken.end(), toToken.begin(),
+                       [](unsigned char c) { return std::toupper(c); });
+        if (toToken == "TO") {
+            cmd.type = CommandType::ROLLBACK;
+            cmd.args.push_back(tokens[1]);
+            for (size_t i = 3; i < tokens.size(); ++i) {
+                if (i > 3) cmd.args.back() += " ";
+                else cmd.args.push_back("");
+                cmd.args.back() += tokens[i];
+            }
+            return cmd;
+        }
+    }
     
     // Get command type from first token
     cmd.type = getCommandType(tokens[0]);
@@ -132,6 +149,7 @@ CommandType CommandParser::getCommandType(const std::string& cmd) {
     if (upper == "SET") return CommandType::SET;
     if (upper == "GET") return CommandType::GET;
     if (upper == "DIFF") return CommandType::DIFF;
+    if (upper == "ROLLBACK") return CommandType::ROLLBACK;
     if (upper == "DEL") return CommandType::DEL;
     if (upper == "HISTORY") return CommandType::HISTORY;
     if (upper == "SNAPSHOT") return CommandType::SNAPSHOT;

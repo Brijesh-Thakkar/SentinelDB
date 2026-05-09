@@ -889,6 +889,46 @@ int main(int argc, char* argv[]) {
             res.set_content(json.str(), "application/json");
         }
     });
+
+    // POST /rollback - Roll back a key to a timestamp with guard evaluation
+    svr.Post("/rollback", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        try {
+            auto params = parseRequestJSON(req.body);
+            std::string key = requireStringField(params, "key");
+            std::string timestampStr = requireStringField(params, "timestamp");
+
+            auto timestamp = parseTimestamp(timestampStr);
+            auto result = kvstore->rollbackToTime(key, timestamp);
+
+            if (!result.found) {
+                res.status = 404;
+                res.set_content("{\"error\":\"No version found at or before timestamp\"}", "application/json");
+                return;
+            }
+
+            std::stringstream json;
+            json << "{\"key\":\"" << escapeJSON(result.key)
+                 << "\",\"timestamp\":\"" << escapeJSON(timestampStr)
+                 << "\",\"value\":\"" << escapeJSON(result.rollbackValue.value()) << "\""
+                 << ",\"committed\":" << (result.committed ? "true" : "false")
+                 << ",\"result\":\"" << guardResultToString(result.evaluation.result) << "\"";
+
+            if (result.hasSuggestedValue) {
+                json << ",\"suggested_value\":\"" << escapeJSON(result.suggestedValue.value()) << "\"";
+            }
+
+            json << ",\"evaluation\":{";
+            appendWriteEvaluationJSON(json, result.key, result.rollbackValue.value(), result.evaluation);
+            json << "}}";
+
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
     
     // GET /explain?key=<key>&timestamp=<timestamp> - Explain temporal query
     svr.Get("/explain", [kvstore](const httplib::Request& req, httplib::Response& res) {

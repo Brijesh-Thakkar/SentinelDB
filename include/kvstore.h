@@ -84,6 +84,18 @@ struct DiffResult {
     WriteEvaluation evaluation;
 };
 
+struct RollbackResult {
+    std::string key;
+    std::chrono::system_clock::time_point targetTimestamp;
+    bool found;
+    std::optional<std::string> rollbackValue;
+    bool committed;
+    std::optional<std::string> storedValue;
+    bool hasSuggestedValue;
+    std::optional<std::string> suggestedValue;
+    WriteEvaluation evaluation;
+};
+
 class KVStore {
 private:
     std::unordered_map<std::string, std::vector<Version>> store;
@@ -141,6 +153,10 @@ public:
     DiffResult diffAtTime(const std::string& key,
                           std::chrono::system_clock::time_point t1,
                           std::chrono::system_clock::time_point t2);
+
+    // Roll back a key to a timestamp with guard evaluation
+    RollbackResult rollbackToTime(const std::string& key,
+                                  std::chrono::system_clock::time_point timestamp);
     
     // Explain temporal query - shows reasoning for version selection
     ExplainResult explainGetAtTime(const std::string& key,

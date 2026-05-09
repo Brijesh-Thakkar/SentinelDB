@@ -188,6 +188,63 @@ DiffResult KVStore::diffAtTime(const std::string& key,
     return result;
 }
 
+RollbackResult KVStore::rollbackToTime(const std::string& key,
+                                       std::chrono::system_clock::time_point timestamp) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+    RollbackResult result;
+    result.key = key;
+    result.targetTimestamp = timestamp;
+    result.found = false;
+    result.committed = false;
+    result.hasSuggestedValue = false;
+
+    auto getValueAt = [&](const std::string& targetKey, std::chrono::system_clock::time_point ts)
+        -> std::optional<std::string> {
+        auto it = store.find(targetKey);
+        if (it == store.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+
+        const auto& versions = it->second;
+        auto upper = std::upper_bound(
+            versions.begin(),
+            versions.end(),
+            ts,
+            [](const auto& timepoint, const Version& version) {
+                return timepoint < version.timestamp;
+            }
+        );
+
+        if (upper == versions.begin()) {
+            return std::nullopt;
+        }
+
+        return std::prev(upper)->value;
+    };
+
+    result.rollbackValue = getValueAt(key, timestamp);
+    if (!result.rollbackValue.has_value()) {
+        return result;
+    }
+
+    result.found = true;
+    result.evaluation = simulateWrite(key, result.rollbackValue.value());
+    applyDecisionPolicy(result.evaluation);
+
+    if (result.evaluation.result == GuardResult::ACCEPT) {
+        if (setInternal(key, result.rollbackValue.value()) == Status::OK) {
+            result.committed = true;
+            result.storedValue = result.rollbackValue;
+        }
+    } else if (result.evaluation.result == GuardResult::COUNTER_OFFER &&
+               !result.evaluation.alternatives.empty()) {
+        result.hasSuggestedValue = true;
+        result.suggestedValue = result.evaluation.alternatives.front().value;
+    }
+
+    return result;
+}
+
 ExplainResult KVStore::explainGetAtTime(const std::string& key,
                                          std::chrono::system_clock::time_point timestamp) {
     // Thread safety: reader/writer lock

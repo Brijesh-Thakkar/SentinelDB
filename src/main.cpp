@@ -114,7 +114,8 @@ public:
     void run() {
         std::cout << "Redis-like Key-Value Database\n";
         std::cout << "Commands: SET key value | GET key | GET key AT <timestamp> | HISTORY key\n";
-        std::cout << "          DIFF key <t1> <t2> | DEL key | SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
+        std::cout << "          DIFF key <t1> <t2> | ROLLBACK key TO <timestamp> | DEL key\n";
+        std::cout << "          SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
         std::cout << "Type 'EXIT' to quit\n\n";
 
         while (running) {
@@ -159,6 +160,10 @@ private:
 
                 case CommandType::DIFF:
                     handleDiff(cmd);
+                    break;
+
+                case CommandType::ROLLBACK:
+                    handleRollback(cmd);
                     break;
                 
                 case CommandType::HISTORY:
@@ -566,6 +571,57 @@ private:
         }
 
         std::cout << "==========================\n\n";
+    }
+
+    void handleRollback(const Command& cmd) {
+        if (cmd.args.size() < 2) {
+            std::cout << "(error) ERR wrong number of arguments for 'ROLLBACK' command\n";
+            std::cout << "Usage: ROLLBACK <key> TO <timestamp>\n";
+            return;
+        }
+
+        const std::string& key = cmd.args[0];
+        const std::string& timestampStr = cmd.args[1];
+
+        auto timestamp = parseTimestamp(timestampStr);
+        if (!timestamp.has_value()) {
+            std::cout << "(error) ERR invalid timestamp format. Use epoch milliseconds or 'YYYY-MM-DD HH:MM:SS'\n";
+            return;
+        }
+
+        auto result = kvstore->rollbackToTime(key, timestamp.value());
+
+        if (!result.found) {
+            std::cout << "(error) ERR no version found at or before timestamp\n";
+            return;
+        }
+
+        std::cout << "\n========== ROLLBACK ==========" << "\n";
+        std::cout << "Key:        " << key << "\n";
+        std::cout << "Timestamp:  " << formatTimestamp(timestamp.value()) << "\n";
+        std::cout << "Value:      \"" << result.rollbackValue.value() << "\"\n";
+        std::cout << "Result:     " << guardResultToString(result.evaluation.result) << "\n";
+        std::cout << "Reason:     " << result.evaluation.reason << "\n";
+
+        if (!result.evaluation.triggeredGuards.empty()) {
+            std::cout << "Guards:     ";
+            for (size_t i = 0; i < result.evaluation.triggeredGuards.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << result.evaluation.triggeredGuards[i];
+            }
+            std::cout << "\n";
+        }
+
+        if (result.committed) {
+            std::cout << "Committed:  true\n";
+        } else {
+            std::cout << "Committed:  false\n";
+            if (result.hasSuggestedValue) {
+                std::cout << "Suggested:  \"" << result.suggestedValue.value() << "\"\n";
+            }
+        }
+
+        std::cout << "============================\n\n";
     }
     
     void handleConfig(const Command& cmd) {
