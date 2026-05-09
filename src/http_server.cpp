@@ -162,6 +162,15 @@ std::string guardResultToString(GuardResult result) {
     return "REJECT";
 }
 
+std::string decisionPolicyToString(DecisionPolicy policy) {
+    switch (policy) {
+        case DecisionPolicy::DEV_FRIENDLY: return "DEV_FRIENDLY";
+        case DecisionPolicy::SAFE_DEFAULT: return "SAFE_DEFAULT";
+        case DecisionPolicy::STRICT: return "STRICT";
+    }
+    return "SAFE_DEFAULT";
+}
+
 void appendWriteEvaluationJSON(std::stringstream& json, const std::string& key,
                                const std::string& value, const WriteEvaluation& evaluation) {
     json << "\"proposal\":{\"key\":\"" << escapeJSON(key)
@@ -881,6 +890,71 @@ int main(int argc, char* argv[]) {
             }
 
             json << "}";
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
+
+    // GET /audit?key=<key>&since=<timestamp> - Audit log for negotiated writes
+    svr.Get("/audit", [kvstore](const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (!req.has_param("key") || !req.has_param("since")) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'key' or 'since' parameter\"}", "application/json");
+                return;
+            }
+
+            std::string key = req.get_param_value("key");
+            std::string sinceStr = req.get_param_value("since");
+            auto since = parseTimestamp(sinceStr);
+            std::optional<std::chrono::system_clock::time_point> sinceOpt = since;
+
+            auto events = kvstore->getAuditEvents(key, sinceOpt);
+
+            std::stringstream json;
+            json << "{\"key\":\"" << escapeJSON(key) << "\",\"since\":\""
+                 << escapeJSON(sinceStr) << "\",\"events\":[";
+
+            for (size_t i = 0; i < events.size(); ++i) {
+                if (i > 0) json << ",";
+                const auto& event = events[i];
+                json << "{\"timestamp\":\"" << escapeJSON(formatTimestamp(event.timestamp))
+                     << "\",\"key\":\"" << escapeJSON(event.key)
+                     << "\",\"original_value\":\"" << escapeJSON(event.originalValue)
+                     << "\",\"guards_fired\":[";
+
+                for (size_t g = 0; g < event.guardsFired.size(); ++g) {
+                    if (g > 0) json << ",";
+                    json << "\"" << escapeJSON(event.guardsFired[g]) << "\"";
+                }
+                json << "],\"policy_used\":\"" << escapeJSON(decisionPolicyToString(event.policyUsed))
+                     << "\",\"alternatives_offered\":[";
+
+                for (size_t a = 0; a < event.alternativesOffered.size(); ++a) {
+                    if (a > 0) json << ",";
+                    const auto& alt = event.alternativesOffered[a];
+                    json << "{\"value\":\"" << escapeJSON(alt.value)
+                         << "\",\"confidence\":" << formatConfidence(alt.confidence)
+                         << ",\"risk\":\"" << escapeJSON(riskLevelToString(alt.risk))
+                         << "\",\"reason\":\"" << escapeJSON(alt.reason) << "\"}";
+                }
+                json << "]";
+
+                json << ",\"final_value\":";
+                if (event.finalValue.has_value()) {
+                    json << "\"" << escapeJSON(event.finalValue.value()) << "\"";
+                } else {
+                    json << "null";
+                }
+
+                json << ",\"outcome\":\"" << escapeJSON(event.outcome) << "\"}";
+            }
+
+            json << "]}";
             res.set_content(json.str(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;

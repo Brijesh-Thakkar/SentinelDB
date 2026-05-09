@@ -115,7 +115,7 @@ public:
         std::cout << "Redis-like Key-Value Database\n";
         std::cout << "Commands: SET key value | GET key | GET key AT <timestamp> | HISTORY key\n";
         std::cout << "          DIFF key <t1> <t2> | ROLLBACK key TO <timestamp> | DEL key\n";
-        std::cout << "          SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
+        std::cout << "          AUDIT key [since] | SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
         std::cout << "Type 'EXIT' to quit\n\n";
 
         while (running) {
@@ -164,6 +164,10 @@ private:
 
                 case CommandType::ROLLBACK:
                     handleRollback(cmd);
+                    break;
+
+                case CommandType::AUDIT:
+                    handleAudit(cmd);
                     break;
                 
                 case CommandType::HISTORY:
@@ -622,6 +626,55 @@ private:
         }
 
         std::cout << "============================\n\n";
+    }
+
+    void handleAudit(const Command& cmd) {
+        if (cmd.args.empty()) {
+            std::cout << "(error) ERR wrong number of arguments for 'AUDIT' command\n";
+            std::cout << "Usage: AUDIT <key> [since]\n";
+            return;
+        }
+
+        const std::string& key = cmd.args[0];
+        std::optional<std::chrono::system_clock::time_point> since;
+        if (cmd.args.size() >= 2) {
+            auto sinceTs = parseTimestamp(cmd.args[1]);
+            if (!sinceTs.has_value()) {
+                std::cout << "(error) ERR invalid timestamp format. Use epoch milliseconds or 'YYYY-MM-DD HH:MM:SS'\n";
+                return;
+            }
+            since = sinceTs;
+        }
+
+        auto events = kvstore->getAuditEvents(key, since);
+        if (events.empty()) {
+            std::cout << "(empty array)\n";
+            return;
+        }
+
+        std::cout << events.size() << " event(s):\n";
+        for (size_t i = 0; i < events.size(); ++i) {
+            const auto& event = events[i];
+            std::cout << (i + 1) << ") [" << formatTimestamp(event.timestamp) << "] "
+                      << event.outcome << "\n";
+            std::cout << "   Original: \"" << event.originalValue << "\"\n";
+            if (event.finalValue.has_value()) {
+                std::cout << "   Final:    \"" << event.finalValue.value() << "\"\n";
+            }
+            std::cout << "   Policy:   "
+                      << (event.policyUsed == DecisionPolicy::DEV_FRIENDLY ? "DEV_FRIENDLY" :
+                          event.policyUsed == DecisionPolicy::STRICT ? "STRICT" : "SAFE_DEFAULT")
+                      << "\n";
+
+            if (!event.guardsFired.empty()) {
+                std::cout << "   Guards:   ";
+                for (size_t g = 0; g < event.guardsFired.size(); ++g) {
+                    if (g > 0) std::cout << ", ";
+                    std::cout << event.guardsFired[g];
+                }
+                std::cout << "\n";
+            }
+        }
     }
     
     void handleConfig(const Command& cmd) {

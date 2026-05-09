@@ -9,6 +9,7 @@
 #include <chrono>
 #include <list>
 #include <shared_mutex>
+#include <deque>
 #include <utility>
 #include "status.h"
 #include "wal.h"
@@ -84,6 +85,17 @@ struct DiffResult {
     WriteEvaluation evaluation;
 };
 
+struct AuditEvent {
+    std::chrono::system_clock::time_point timestamp;
+    std::string key;
+    std::string originalValue;
+    std::vector<std::string> guardsFired;
+    DecisionPolicy policyUsed;
+    std::vector<Alternative> alternativesOffered;
+    std::optional<std::string> finalValue;
+    std::string outcome;
+};
+
 struct RollbackResult {
     std::string key;
     std::chrono::system_clock::time_point targetTimestamp;
@@ -105,6 +117,7 @@ private:
     std::vector<std::shared_ptr<Guard>> guards;  // Active guard constraints
     DecisionPolicy decisionPolicy;  // Active decision policy for guard violations
     mutable std::shared_mutex rwMutex_;
+    std::deque<AuditEvent> auditLog_;
 
     // Internal set implementation for already-locked callers
     Status setInternal(const std::string& key, const std::string& value);
@@ -127,6 +140,12 @@ private:
     
     // Apply decision policy to guard evaluation results
     void applyDecisionPolicy(WriteEvaluation& evaluation);
+
+    // Append an audit event for a negotiated write
+    void appendAuditEvent(const std::string& key,
+                          const std::string& originalValue,
+                          const WriteEvaluation& evaluation,
+                          const std::optional<std::string>& finalValue);
 
 public:
     // Constructor with optional WAL
@@ -157,6 +176,10 @@ public:
     // Roll back a key to a timestamp with guard evaluation
     RollbackResult rollbackToTime(const std::string& key,
                                   std::chrono::system_clock::time_point timestamp);
+
+    // Retrieve audit events for a key since an optional timestamp
+    std::vector<AuditEvent> getAuditEvents(const std::string& key,
+                                           const std::optional<std::chrono::system_clock::time_point>& since) const;
     
     // Explain temporal query - shows reasoning for version selection
     ExplainResult explainGetAtTime(const std::string& key,

@@ -55,6 +55,16 @@ public:
     // Log a GUARD ADD command to WAL
     Status logGuardAdd(const std::string& guardType, const std::string& guardName,
                        const std::string& keyPattern, const std::string& params);
+
+    // Log an AUDIT event to WAL
+    Status logAudit(const std::string& key,
+                    const std::string& originalValue,
+                    const std::string& finalValue,
+                    const std::string& outcome,
+                    const std::string& policy,
+                    const std::string& guards,
+                    const std::string& alternatives,
+                    std::chrono::system_clock::time_point timestamp);
     
     // Read all commands from WAL file
     std::vector<std::string> readLog();

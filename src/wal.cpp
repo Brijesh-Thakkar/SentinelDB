@@ -221,6 +221,49 @@ Status WAL::logGuardAdd(const std::string& guardType, const std::string& guardNa
     }
 }
 
+Status WAL::logAudit(const std::string& key,
+                     const std::string& originalValue,
+                     const std::string& finalValue,
+                     const std::string& outcome,
+                     const std::string& policy,
+                     const std::string& guards,
+                     const std::string& alternatives,
+                     std::chrono::system_clock::time_point timestamp) {
+    if (!enabled || !logFile.is_open()) {
+        return Status::ERROR;
+    }
+
+    try {
+        auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            timestamp.time_since_epoch()).count();
+
+        std::ostringstream contentStream;
+        contentStream << "AUDIT " << epochMs << " "
+                      << std::quoted(key) << " "
+                      << std::quoted(originalValue) << " "
+                      << std::quoted(finalValue) << " "
+                      << std::quoted(outcome) << " "
+                      << std::quoted(policy) << " "
+                      << std::quoted(guards) << " "
+                      << std::quoted(alternatives);
+
+        std::string content = contentStream.str();
+        uint32_t crc = computeCRC32(content);
+        logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
+                << crc << std::dec << std::setfill(' ') << "\n";
+        logFile.flush();
+        {
+            std::lock_guard<std::mutex> lock(flushMutex_);
+            pendingFlush_ = true;
+        }
+        flushCV_.notify_one();
+        return Status::OK;
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to write audit to WAL: " << e.what() << "\n";
+        return Status::ERROR;
+    }
+}
+
 std::vector<std::string> WAL::readLog() {
     std::vector<std::string> commands;
     size_t checksumErrors = 0;

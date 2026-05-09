@@ -5,6 +5,31 @@
 #include <mutex>
 #include <shared_mutex>
 
+namespace {
+std::string decisionPolicyToString(DecisionPolicy policy) {
+    switch (policy) {
+        case DecisionPolicy::DEV_FRIENDLY:
+            return "DEV_FRIENDLY";
+        case DecisionPolicy::SAFE_DEFAULT:
+            return "SAFE_DEFAULT";
+        case DecisionPolicy::STRICT:
+            return "STRICT";
+    }
+    return "SAFE_DEFAULT";
+}
+
+std::string joinStrings(const std::vector<std::string>& values, char separator) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            oss << separator;
+        }
+        oss << values[i];
+    }
+    return oss.str();
+}
+}
+
 KVStore::KVStore(std::shared_ptr<WAL> walPtr) 
     : wal(walPtr), walEnabled(true), decisionPolicy(DecisionPolicy::SAFE_DEFAULT) {}
 
@@ -230,6 +255,16 @@ RollbackResult KVStore::rollbackToTime(const std::string& key,
     result.found = true;
     result.evaluation = simulateWrite(key, result.rollbackValue.value());
     applyDecisionPolicy(result.evaluation);
+
+    std::optional<std::string> finalValue;
+    if (result.evaluation.result == GuardResult::ACCEPT) {
+        finalValue = result.rollbackValue.value();
+    } else if (result.evaluation.result == GuardResult::COUNTER_OFFER &&
+               !result.evaluation.alternatives.empty()) {
+        finalValue = result.evaluation.alternatives.front().value;
+    }
+
+    appendAuditEvent(key, result.rollbackValue.value(), result.evaluation, finalValue);
 
     if (result.evaluation.result == GuardResult::ACCEPT) {
         if (setInternal(key, result.rollbackValue.value()) == Status::OK) {
@@ -623,14 +658,64 @@ void KVStore::applyDecisionPolicy(WriteEvaluation& evaluation) {
     }
 }
 
+void KVStore::appendAuditEvent(const std::string& key,
+                               const std::string& originalValue,
+                               const WriteEvaluation& evaluation,
+                               const std::optional<std::string>& finalValue) {
+    AuditEvent event;
+    event.timestamp = std::chrono::system_clock::now();
+    event.key = key;
+    event.originalValue = originalValue;
+    event.guardsFired = evaluation.triggeredGuards;
+    event.policyUsed = evaluation.appliedPolicy;
+    event.alternativesOffered = evaluation.alternatives;
+    event.finalValue = finalValue;
+
+    if (evaluation.result == GuardResult::ACCEPT) {
+        event.outcome = "accepted";
+    } else if (evaluation.result == GuardResult::COUNTER_OFFER) {
+        event.outcome = "rewritten";
+    } else {
+        event.outcome = "rejected";
+    }
+
+    auditLog_.push_back(event);
+
+    if (walEnabled && wal && wal->isEnabled()) {
+        std::string guards = joinStrings(event.guardsFired, '|');
+        std::vector<std::string> altValues;
+        altValues.reserve(event.alternativesOffered.size());
+        for (const auto& alt : event.alternativesOffered) {
+            altValues.push_back(alt.value);
+        }
+        std::string alternatives = joinStrings(altValues, '|');
+        wal->logAudit(event.key,
+                      event.originalValue,
+                      event.finalValue.value_or(""),
+                      event.outcome,
+                      decisionPolicyToString(event.policyUsed),
+                      guards,
+                      alternatives,
+                      event.timestamp);
+    }
+}
+
 WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& value) {
     // Thread safety: reader/writer lock
-    std::shared_lock<std::shared_mutex> lock(rwMutex_);
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
     // Simulate without mutating state
     auto evaluation = simulateWrite(key, value);
     
     // Apply decision policy to the evaluation result
     applyDecisionPolicy(evaluation);
+
+    std::optional<std::string> finalValue;
+    if (evaluation.result == GuardResult::ACCEPT) {
+        finalValue = value;
+    } else if (evaluation.result == GuardResult::COUNTER_OFFER && !evaluation.alternatives.empty()) {
+        finalValue = evaluation.alternatives.front().value;
+    }
+    appendAuditEvent(key, value, evaluation, finalValue);
     
     return evaluation;
 }
@@ -657,8 +742,11 @@ NegotiatedWriteResult KVStore::safeSet(const std::string& key, const std::string
         // Alternatives are already ordered by each guard's recommendation quality.
         chosenValue = result.evaluation.alternatives.front().value;
     } else {
+        appendAuditEvent(key, value, result.evaluation, std::nullopt);
         return result;
     }
+
+    appendAuditEvent(key, value, result.evaluation, chosenValue);
 
     if (setInternal(key, chosenValue) == Status::OK) {
         result.committed = true;
@@ -727,6 +815,11 @@ BatchPlan KVStore::planBatch(const std::vector<std::pair<std::string, std::strin
         } else {
             plan.canCommit = false;
         }
+
+        appendAuditEvent(item.key,
+                         item.proposedValue,
+                         item.evaluation,
+                         item.hasFinalValue ? std::optional<std::string>(finalValue) : std::nullopt);
 
         if (item.hasFinalValue) {
             item.finalValue = finalValue;
@@ -846,4 +939,23 @@ DecisionPolicy KVStore::getDecisionPolicy() const {
     // Thread safety: reader/writer lock
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return decisionPolicy;
+}
+
+std::vector<AuditEvent> KVStore::getAuditEvents(
+    const std::string& key,
+    const std::optional<std::chrono::system_clock::time_point>& since) const {
+    std::shared_lock<std::shared_mutex> lock(rwMutex_);
+    std::vector<AuditEvent> events;
+
+    for (const auto& event : auditLog_) {
+        if (!key.empty() && event.key != key) {
+            continue;
+        }
+        if (since.has_value() && event.timestamp < since.value()) {
+            continue;
+        }
+        events.push_back(event);
+    }
+
+    return events;
 }
