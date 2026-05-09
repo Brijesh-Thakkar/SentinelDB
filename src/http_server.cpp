@@ -131,6 +131,41 @@ std::string joinWalValues(const std::vector<std::string>& values) {
     return oss.str();
 }
 
+std::string escapeJSON(const std::string& str);
+
+std::string guardResultToString(GuardResult result) {
+    switch (result) {
+        case GuardResult::ACCEPT: return "ACCEPT";
+        case GuardResult::REJECT: return "REJECT";
+        case GuardResult::COUNTER_OFFER: return "COUNTER_OFFER";
+    }
+    return "REJECT";
+}
+
+void appendWriteEvaluationJSON(std::stringstream& json, const std::string& key,
+                               const std::string& value, const WriteEvaluation& evaluation) {
+    json << "\"proposal\":{\"key\":\"" << escapeJSON(key)
+         << "\",\"value\":\"" << escapeJSON(value) << "\"},";
+    json << "\"result\":\"" << guardResultToString(evaluation.result) << "\",";
+    json << "\"reason\":\"" << escapeJSON(evaluation.reason) << "\",";
+
+    json << "\"triggeredGuards\":[";
+    for (size_t i = 0; i < evaluation.triggeredGuards.size(); ++i) {
+        if (i > 0) json << ",";
+        json << "\"" << escapeJSON(evaluation.triggeredGuards[i]) << "\"";
+    }
+    json << "],";
+
+    json << "\"alternatives\":[";
+    for (size_t i = 0; i < evaluation.alternatives.size(); ++i) {
+        if (i > 0) json << ",";
+        const auto& alt = evaluation.alternatives[i];
+        json << "{\"value\":\"" << escapeJSON(alt.value)
+             << "\",\"explanation\":\"" << escapeJSON(alt.explanation) << "\"}";
+    }
+    json << "]";
+}
+
 // Helper function to escape JSON strings
 std::string escapeJSON(const std::string& str) {
     std::string result;
@@ -778,51 +813,92 @@ int main(int argc, char* argv[]) {
             
             // Evaluate the proposed write
             auto evaluation = kvstore->proposeSet(key, value);
-
-            std::string resultStr;
-            switch (evaluation.result) {
-                case GuardResult::ACCEPT: resultStr = "ACCEPT"; break;
-                case GuardResult::REJECT: resultStr = "REJECT"; break;
-                case GuardResult::COUNTER_OFFER: resultStr = "COUNTER_OFFER"; break;
-            }
+            std::string resultStr = guardResultToString(evaluation.result);
             spdlog::info("[HTTP] POST /propose - Result: {} ({} alternative(s))", resultStr, evaluation.alternatives.size());
             
             std::stringstream json;
-            json << "{\"proposal\":{\"key\":\"" << escapeJSON(key) 
-                 << "\",\"value\":\"" << escapeJSON(value) << "\"},";
-            
-            // Result
-            json << "\"result\":\"";
-            switch (evaluation.result) {
-                case GuardResult::ACCEPT: json << "ACCEPT"; break;
-                case GuardResult::REJECT: json << "REJECT"; break;
-                case GuardResult::COUNTER_OFFER: json << "COUNTER_OFFER"; break;
-            }
-            json << "\",";
-            
-            json << "\"reason\":\"" << escapeJSON(evaluation.reason) << "\",";
-            
-            // Triggered guards
-            json << "\"triggeredGuards\":[";
-            for (size_t i = 0; i < evaluation.triggeredGuards.size(); ++i) {
-                if (i > 0) json << ",";
-                json << "\"" << escapeJSON(evaluation.triggeredGuards[i]) << "\"";
-            }
-            json << "],";
-            
-            // Alternatives
-            json << "\"alternatives\":[";
-            for (size_t i = 0; i < evaluation.alternatives.size(); ++i) {
-                if (i > 0) json << ",";
-                const auto& alt = evaluation.alternatives[i];
-                json << "{\"value\":\"" << escapeJSON(alt.value) 
-                     << "\",\"explanation\":\"" << escapeJSON(alt.explanation) << "\"}";
-            }
-            json << "]}";
+            json << "{";
+            appendWriteEvaluationJSON(json, key, value, evaluation);
+            json << "}";
             
             res.set_content(json.str(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;
+            std::stringstream json;
+            json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
+            res.set_content(json.str(), "application/json");
+        }
+    });
+
+    // POST /safe_set - Negotiate and commit a write in one server-side round trip
+    svr.Post("/safe_set", [kvstore, walPath, MAX_BODY_SIZE, MAX_KEY_SIZE, MAX_VALUE_SIZE](const httplib::Request& req, httplib::Response& res) {
+        RequestTimer timer("/safe_set");
+        if (req.body.size() > MAX_BODY_SIZE) {
+            Metrics::instance().recordRequest("/safe_set", "error");
+            res.status = 413;
+            res.set_content("{\"error\":\"Request too large\"}", "application/json");
+            return;
+        }
+
+        try {
+            auto params = parseRequestJSON(req.body);
+            std::string key = requireStringField(params, "key");
+            auto valueIt = params.find("value");
+            if (valueIt == params.end()) {
+                res.status = 400;
+                res.set_content("{\"error\":\"Missing 'key' or 'value' parameter\"}", "application/json");
+                return;
+            }
+            std::string value = jsonValueToStoredString(*valueIt);
+
+            if (key.size() > MAX_KEY_SIZE) {
+                Metrics::instance().recordRequest("/safe_set", "error");
+                res.status = 400;
+                res.set_content("{\"error\":\"Key too long (max 256 bytes)\"}", "application/json");
+                return;
+            }
+            if (value.size() > MAX_VALUE_SIZE) {
+                Metrics::instance().recordRequest("/safe_set", "error");
+                res.status = 400;
+                res.set_content("{\"error\":\"Value too large (max 1MB)\"}", "application/json");
+                return;
+            }
+
+            spdlog::info("[HTTP] POST /safe_set - Negotiating write: {} = {}", key, value);
+            auto negotiation = kvstore->safeSet(key, value);
+
+            std::stringstream json;
+            json << "{";
+            appendWriteEvaluationJSON(json, key, value, negotiation.evaluation);
+            json << ",\"committed\":" << (negotiation.committed ? "true" : "false") << ",";
+            if (negotiation.committed) {
+                json << "\"storedValue\":\"" << escapeJSON(negotiation.storedValue) << "\"";
+            } else {
+                json << "\"storedValue\":null";
+            }
+            json << "}";
+
+            if (!negotiation.committed) {
+                Metrics::instance().recordRequest("/safe_set", "error");
+                res.status = 409;
+                res.set_content(json.str(), "application/json");
+                return;
+            }
+
+            Metrics::instance().recordRequest("/safe_set", "ok");
+            Metrics::instance().setActiveKeys(kvstore->size());
+            {
+                struct stat walStat;
+                if (stat(walPath.c_str(), &walStat) == 0) {
+                    Metrics::instance().setWalSize(static_cast<size_t>(walStat.st_size));
+                }
+            }
+
+            spdlog::info("[HTTP] POST /safe_set - Stored value for key {} as {}", key, negotiation.storedValue);
+            res.set_content(json.str(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            Metrics::instance().recordRequest("/safe_set", "error");
             std::stringstream json;
             json << "{\"error\":\"Invalid request: " << escapeJSON(e.what()) << "\"}";
             res.set_content(json.str(), "application/json");

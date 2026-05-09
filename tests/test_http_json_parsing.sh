@@ -114,22 +114,46 @@ response="$(request POST /guards '{"type":"ENUM","name":"role_guard","keyPattern
 assert_status "$response" 200
 assert_contains "$response" '"status":"ok"'
 
-echo "Test 7: /config/retention accepts a JSON string with spaces"
+echo "Test 7: /guards accepts a RANGE_INT guard for safe_set"
+response="$(request POST /guards '{"type":"RANGE_INT","name":"score_guard","keyPattern":"score","min":"0","max":"100"}')"
+assert_status "$response" 200
+assert_contains "$response" '"status":"ok"'
+
+echo "Test 8: /safe_set negotiates and stores the chosen value"
+response="$(request POST /safe_set '{"key":"score","value":"150"}')"
+assert_status "$response" 200
+assert_contains "$response" '"result":"COUNTER_OFFER"'
+assert_contains "$response" '"committed":true'
+assert_contains "$response" '"storedValue":"100"'
+
+echo "Test 9: /get returns the server-selected safe_set value"
+response="$(request GET '/get?key=score')"
+assert_status "$response" 200
+assert_contains "$response" '"value":"100"'
+
+echo "Test 10: /config/retention accepts a JSON string with spaces"
 response="$(request POST /config/retention '{"mode":"LAST 5"}')"
 assert_status "$response" 200
 assert_contains "$response" '"status":"ok"'
 
-echo "Test 8: /policy accepts valid JSON"
+echo "Test 11: /policy accepts valid JSON"
 response="$(request POST /policy '{"policy":"STRICT"}')"
 assert_status "$response" 200
 assert_contains "$response" '"activePolicy":"STRICT"'
 
-echo "Test 9: malformed JSON is rejected"
+echo "Test 12: STRICT /safe_set rejects without committing"
+response="$(request POST /safe_set '{"key":"score","value":"150"}')"
+assert_status "$response" 409
+assert_contains "$response" '"result":"REJECT"'
+assert_contains "$response" '"committed":false'
+assert_contains "$response" '"storedValue":null'
+
+echo "Test 13: malformed JSON is rejected"
 response="$(request POST /set '{"key":"broken","value":}')"
 assert_status "$response" 400
 assert_contains "$response" 'Invalid request'
 
-echo "Test 10: values with spaces and nested JSON survive restart"
+echo "Test 14: values with spaces and nested JSON survive restart"
 stop_server
 start_server
 

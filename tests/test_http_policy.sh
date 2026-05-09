@@ -93,9 +93,27 @@ curl -s -X POST http://localhost:8888/policy \
 RESPONSE=$(curl -s http://localhost:8888/policy)
 check_result "Policy set to DEV_FRIENDLY" "DEV_FRIENDLY" "$RESPONSE"
 
-# TEST 7: Policy persisted in WAL via HTTP
+# TEST 7: STRICT policy rejects /safe_set writes without committing
 echo ""
-echo "Test 7: HTTP policy changes persisted in WAL"
+echo "Test 7: STRICT policy rejects /safe_set"
+curl -s -X POST http://localhost:8888/guards \
+    -H "Content-Type: application/json" \
+    -d '{"type":"RANGE_INT","name":"strict_score_guard","keyPattern":"strict_score","min":"0","max":"100"}' > /dev/null
+curl -s -X POST http://localhost:8888/policy \
+    -H "Content-Type: application/json" \
+    -d '{"policy":"STRICT"}' > /dev/null
+RESPONSE=$(curl -s -o /tmp/safe_set_strict_response.json -w "%{http_code}" -X POST http://localhost:8888/safe_set \
+    -H "Content-Type: application/json" \
+    -d '{"key":"strict_score","value":"150"}')
+BODY=$(cat /tmp/safe_set_strict_response.json)
+check_result "STRICT /safe_set returns 409" "409" "$RESPONSE"
+check_result "STRICT /safe_set reports uncommitted" "\"committed\":false" "$BODY"
+GET_RESPONSE=$(curl -s "http://localhost:8888/get?key=strict_score")
+check_result "STRICT /safe_set does not create key" "Key not found" "$GET_RESPONSE"
+
+# TEST 8: Policy persisted in WAL via HTTP
+echo ""
+echo "Test 8: HTTP policy changes persisted in WAL"
 
 # Kill server
 kill $HTTP_PID 2>/dev/null
@@ -114,7 +132,7 @@ sleep 2
 
 # Check policy is restored
 RESPONSE=$(curl -s http://localhost:8888/policy)
-check_result "Policy restored after restart" "DEV_FRIENDLY" "$RESPONSE"
+check_result "Policy restored after restart" "STRICT" "$RESPONSE"
 
 # Cleanup
 kill $HTTP_PID 2>/dev/null

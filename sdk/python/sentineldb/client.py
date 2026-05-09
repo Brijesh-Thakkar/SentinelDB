@@ -94,33 +94,33 @@ class SentinelDB:
         Returns ProposalResult with status and alternatives.
         """
         data = self._request("POST", "/propose", json={"key": key, "value": value})
-        alternatives = [
-            Alternative(value=alt["value"], explanation=alt.get("explanation", ""))
-            for alt in data.get("alternatives", [])
-        ]
-        return ProposalResult(
-            key=key,
-            proposed_value=value,
-            status=data.get("result", "REJECT"),
-            reason=data.get("reason", ""),
-            alternatives=alternatives,
-            triggered_guards=data.get("triggeredGuards", [])
-        )
+        return _proposal_result_from_response(key, value, data)
 
-    def safe_set(self, key: str, value: str,
-                 use_first_alternative: bool = True) -> ProposalResult:
+    def safe_set(self, key: str, value: str) -> ProposalResult:
         """
-        Propose then commit. If counter-offered, uses first alternative.
-        Raises GuardViolationError if rejected with no alternatives.
+        Ask the server to negotiate and commit in one round trip.
+        Returns the stored value in ProposalResult.stored_value.
         """
-        result = self.propose(key, value)
-        if result.accepted:
-            self.set(key, value)
+        try:
+            resp = self.session.request(
+                "POST",
+                f"{self.url}/safe_set",
+                timeout=self.timeout,
+                json={"key": key, "value": value}
+            )
+        except requests.exceptions.ConnectionError as e:
+            raise ConnectionError(self.url, e)
+        except requests.exceptions.Timeout:
+            raise SentinelDBError(f"Request timed out after {self.timeout}s")
+
+        data = resp.json()
+        result = _proposal_result_from_response(key, value, data)
+
+        if resp.ok:
             return result
-        if result.has_alternatives and use_first_alternative:
-            self.set(key, result.alternatives[0].value)
-            return result
-        raise GuardViolationError(key, result.reason, result.alternatives)
+        if resp.status_code == 409:
+            raise GuardViolationError(key, result.reason, result.alternatives)
+        raise SentinelDBError(f"HTTP {resp.status_code}: {resp.text}")
 
     # ── Guard Management ─────────────────────────────────────────
 
@@ -189,3 +189,19 @@ class SentinelDB:
 
     def __repr__(self):
         return f"SentinelDB(url={self.url!r})"
+
+
+def _proposal_result_from_response(key: str, value: str, data: dict) -> ProposalResult:
+    alternatives = [
+        Alternative(value=alt["value"], explanation=alt.get("explanation", ""))
+        for alt in data.get("alternatives", [])
+    ]
+    return ProposalResult(
+        key=key,
+        proposed_value=value,
+        status=data.get("result", "REJECT"),
+        reason=data.get("reason", ""),
+        stored_value=data.get("storedValue"),
+        alternatives=alternatives,
+        triggered_guards=data.get("triggeredGuards", [])
+    )

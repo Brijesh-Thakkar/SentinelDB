@@ -146,6 +146,9 @@ public:
     
     // Commit a write (after proposal accepted or user override)
     Status commitSet(const std::string& key, const std::string& value);
+
+    // Atomically negotiate and commit a write using the best safe alternative
+    NegotiatedWriteResult safeSet(const std::string& key, const std::string& value);
     
     // Add a guard constraint
     void addGuard(std::shared_ptr<Guard> guard);

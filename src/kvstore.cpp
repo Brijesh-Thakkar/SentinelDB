@@ -459,6 +459,32 @@ Status KVStore::commitSet(const std::string& key, const std::string& value) {
     return setInternal(key, value);
 }
 
+NegotiatedWriteResult KVStore::safeSet(const std::string& key, const std::string& value) {
+    std::unique_lock<std::shared_mutex> lock(rwMutex_);
+
+    NegotiatedWriteResult result;
+    result.evaluation = simulateWrite(key, value);
+    applyDecisionPolicy(result.evaluation);
+
+    std::string chosenValue;
+    if (result.evaluation.result == GuardResult::ACCEPT) {
+        chosenValue = value;
+    } else if (result.evaluation.result == GuardResult::COUNTER_OFFER &&
+               !result.evaluation.alternatives.empty()) {
+        // Alternatives are already ordered by each guard's recommendation quality.
+        chosenValue = result.evaluation.alternatives.front().value;
+    } else {
+        return result;
+    }
+
+    if (setInternal(key, chosenValue) == Status::OK) {
+        result.committed = true;
+        result.storedValue = chosenValue;
+    }
+
+    return result;
+}
+
 void KVStore::addGuard(std::shared_ptr<Guard> guard) {
     // Thread safety: reader/writer lock
     std::unique_lock<std::shared_mutex> lock(rwMutex_);

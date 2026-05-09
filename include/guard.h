@@ -44,6 +44,15 @@ struct WriteEvaluation {
     WriteEvaluation() : result(GuardResult::ACCEPT), appliedPolicy(DecisionPolicy::SAFE_DEFAULT) {}
 };
 
+// Result of a server-owned negotiate-and-commit write
+struct NegotiatedWriteResult {
+    WriteEvaluation evaluation;
+    bool committed;
+    std::string storedValue;
+
+    NegotiatedWriteResult() : committed(false) {}
+};
+
 // Guard constraint types
 enum class GuardType {
     RANGE_INT,      // Integer range check

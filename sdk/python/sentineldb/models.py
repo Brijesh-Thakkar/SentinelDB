@@ -17,6 +17,7 @@ class ProposalResult:
     proposed_value: str
     status: str
     reason: str
+    stored_value: Optional[str] = None
     alternatives: List[Alternative] = field(default_factory=list)
     triggered_guards: List[str] = field(default_factory=list)
 
