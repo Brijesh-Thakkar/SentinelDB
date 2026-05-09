@@ -3,6 +3,14 @@
 #include <sstream>
 #include <cmath>
 
+namespace {
+double clampConfidence(double value) {
+    if (value < 0.0) return 0.0;
+    if (value > 1.0) return 1.0;
+    return value;
+}
+}
+
 // Helper function for wildcard matching
 bool Guard::appliesTo(const std::string& targetKey) const {
     // Simple wildcard matching: * matches any characters
@@ -48,6 +56,8 @@ std::vector<Alternative> RangeIntGuard::generateAlternatives(const std::string& 
         if (value < minValue) {
             alternatives.emplace_back(
                 std::to_string(minValue),
+                clampConfidence(0.95),
+                RiskLevel::LOW,
                 "Minimum allowed value (proposed " + std::to_string(value) + " is too low)"
             );
             
@@ -56,12 +66,16 @@ std::vector<Alternative> RangeIntGuard::generateAlternatives(const std::string& 
                 int midpoint = minValue + (maxValue - minValue) / 4;
                 alternatives.emplace_back(
                     std::to_string(midpoint),
+                    clampConfidence(0.8),
+                    RiskLevel::MEDIUM,
                     "Conservative value within range"
                 );
             }
         } else if (value > maxValue) {
             alternatives.emplace_back(
                 std::to_string(maxValue),
+                clampConfidence(0.95),
+                RiskLevel::LOW,
                 "Maximum allowed value (proposed " + std::to_string(value) + " is too high)"
             );
             
@@ -70,6 +84,8 @@ std::vector<Alternative> RangeIntGuard::generateAlternatives(const std::string& 
                 int midpoint = maxValue - (maxValue - minValue) / 4;
                 alternatives.emplace_back(
                     std::to_string(midpoint),
+                    clampConfidence(0.8),
+                    RiskLevel::MEDIUM,
                     "Conservative value within range"
                 );
             }
@@ -78,14 +94,20 @@ std::vector<Alternative> RangeIntGuard::generateAlternatives(const std::string& 
         // Invalid integer, suggest valid examples
         alternatives.emplace_back(
             std::to_string(minValue),
+            clampConfidence(0.85),
+            RiskLevel::LOW,
             "Minimum allowed value"
         );
         alternatives.emplace_back(
             std::to_string((minValue + maxValue) / 2),
+            clampConfidence(0.7),
+            RiskLevel::MEDIUM,
             "Midpoint value"
         );
         alternatives.emplace_back(
             std::to_string(maxValue),
+            clampConfidence(0.85),
+            RiskLevel::LOW,
             "Maximum allowed value"
         );
     }
@@ -136,6 +158,8 @@ std::vector<Alternative> EnumGuard::generateAlternatives(const std::string& prop
         if (lowerAllowed == lowerProposed) {
             alternatives.emplace_back(
                 allowed,
+                clampConfidence(0.95),
+                RiskLevel::LOW,
                 "Case-corrected version of proposed value"
             );
         }
@@ -162,6 +186,8 @@ std::vector<Alternative> EnumGuard::generateAlternatives(const std::string& prop
             if (!alreadyAdded) {
                 alternatives.emplace_back(
                     allowed,
+                    clampConfidence(0.7),
+                    RiskLevel::MEDIUM,
                     "Similar to proposed value"
                 );
             }
@@ -174,6 +200,8 @@ std::vector<Alternative> EnumGuard::generateAlternatives(const std::string& prop
         for (size_t i = 0; i < suggestCount; ++i) {
             alternatives.emplace_back(
                 allowedValues[i],
+                clampConfidence(0.6),
+                RiskLevel::MEDIUM,
                 "Allowed value"
             );
         }
@@ -218,6 +246,8 @@ std::vector<Alternative> LengthGuard::generateAlternatives(const std::string& pr
         std::string padded = proposedValue + std::string(minLength - len, '*');
         alternatives.emplace_back(
             padded,
+            clampConfidence(0.75),
+            RiskLevel::MEDIUM,
             "Padded to minimum length " + std::to_string(minLength)
         );
     } else if (len > maxLength) {
@@ -225,6 +255,8 @@ std::vector<Alternative> LengthGuard::generateAlternatives(const std::string& pr
         std::string truncated = proposedValue.substr(0, maxLength);
         alternatives.emplace_back(
             truncated,
+            clampConfidence(0.8),
+            RiskLevel::MEDIUM,
             "Truncated to maximum length " + std::to_string(maxLength)
         );
         
@@ -234,6 +266,8 @@ std::vector<Alternative> LengthGuard::generateAlternatives(const std::string& pr
             std::string shorter = proposedValue.substr(0, shorterLen);
             alternatives.emplace_back(
                 shorter,
+                clampConfidence(0.7),
+                RiskLevel::MEDIUM,
                 "Truncated to " + std::to_string(shorterLen) + " characters (safer margin)"
             );
         }

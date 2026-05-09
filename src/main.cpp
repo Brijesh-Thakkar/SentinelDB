@@ -652,7 +652,9 @@ private:
                     for (size_t i = 0; i < evaluation.alternatives.size(); ++i) {
                         const auto& alt = evaluation.alternatives[i];
                         std::cout << "  " << (i + 1) << ") \"" << alt.value << "\"\n";
-                        std::cout << "     → " << alt.explanation << "\n";
+                        std::cout << "     → " << alt.reason << "\n";
+                        std::cout << "       confidence=" << std::fixed << std::setprecision(2)
+                                  << alt.confidence << " risk=" << riskLevelToString(alt.risk) << "\n";
                     }
                 }
                 break;

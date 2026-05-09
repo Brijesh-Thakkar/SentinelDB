@@ -133,6 +133,12 @@ std::string joinWalValues(const std::vector<std::string>& values) {
 
 std::string escapeJSON(const std::string& str);
 
+std::string formatConfidence(double value) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << value;
+    return oss.str();
+}
+
 std::string guardResultToString(GuardResult result) {
     switch (result) {
         case GuardResult::ACCEPT: return "ACCEPT";
@@ -161,7 +167,9 @@ void appendWriteEvaluationJSON(std::stringstream& json, const std::string& key,
         if (i > 0) json << ",";
         const auto& alt = evaluation.alternatives[i];
         json << "{\"value\":\"" << escapeJSON(alt.value)
-             << "\",\"explanation\":\"" << escapeJSON(alt.explanation) << "\"}";
+             << "\",\"confidence\":" << formatConfidence(alt.confidence)
+             << ",\"risk\":\"" << escapeJSON(riskLevelToString(alt.risk))
+             << "\",\"reason\":\"" << escapeJSON(alt.reason) << "\"}";
     }
     json << "]";
 }

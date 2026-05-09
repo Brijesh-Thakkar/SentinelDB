@@ -21,13 +21,31 @@ enum class GuardResult {
     COUNTER_OFFER
 };
 
-// Alternative value with explanation
+// Risk level for alternatives
+enum class RiskLevel {
+    LOW,
+    MEDIUM,
+    HIGH
+};
+
+inline const char* riskLevelToString(RiskLevel level) {
+    switch (level) {
+        case RiskLevel::LOW: return "low";
+        case RiskLevel::MEDIUM: return "medium";
+        case RiskLevel::HIGH: return "high";
+    }
+    return "high";
+}
+
+// Alternative value with score and safety context
 struct Alternative {
     std::string value;
-    std::string explanation;
+    double confidence;
+    RiskLevel risk;
+    std::string reason;
     
-    Alternative(const std::string& v, const std::string& e)
-        : value(v), explanation(e) {}
+    Alternative(const std::string& v, double c, RiskLevel r, const std::string& rsn)
+        : value(v), confidence(c), risk(r), reason(rsn) {}
 };
 
 // Result of write evaluation

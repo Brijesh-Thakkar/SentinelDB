@@ -337,7 +337,29 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
     
     // Evaluate each guard
     bool allAccepted = true;
-    std::vector<Alternative> collectedAlternatives;
+
+    struct MergedAlternative {
+        std::string value;
+        double confidenceSum{0.0};
+        size_t count{0};
+        RiskLevel risk{RiskLevel::LOW};
+        std::vector<std::string> reasons;
+    };
+
+    auto riskRank = [](RiskLevel level) {
+        switch (level) {
+            case RiskLevel::LOW: return 0;
+            case RiskLevel::MEDIUM: return 1;
+            case RiskLevel::HIGH: return 2;
+        }
+        return 2;
+    };
+
+    auto maxRisk = [&](RiskLevel left, RiskLevel right) {
+        return riskRank(left) >= riskRank(right) ? left : right;
+    };
+
+    std::unordered_map<std::string, MergedAlternative> mergedAlternatives;
     
     for (const auto& guard : applicableGuards) {
         std::string guardReason;
@@ -356,17 +378,16 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
             // Collect alternatives from this guard
             auto guardAlts = guard->generateAlternatives(value);
             for (const auto& alt : guardAlts) {
-                // Avoid duplicate alternatives
-                bool duplicate = false;
-                for (const auto& existing : collectedAlternatives) {
-                    if (existing.value == alt.value) {
-                        duplicate = true;
-                        break;
-                    }
+                auto& merged = mergedAlternatives[alt.value];
+                if (merged.count == 0) {
+                    merged.value = alt.value;
+                    merged.risk = alt.risk;
+                } else {
+                    merged.risk = maxRisk(merged.risk, alt.risk);
                 }
-                if (!duplicate) {
-                    collectedAlternatives.push_back(alt);
-                }
+                merged.confidenceSum += alt.confidence;
+                merged.count += 1;
+                merged.reasons.push_back(guard->getName() + ": " + alt.reason);
             }
             
             if (evaluation.reason.empty()) {
@@ -379,7 +400,41 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
     
     if (!allAccepted) {
         evaluation.result = GuardResult::COUNTER_OFFER;
-        evaluation.alternatives = collectedAlternatives;
+        evaluation.alternatives.clear();
+        evaluation.alternatives.reserve(mergedAlternatives.size());
+
+        for (const auto& entry : mergedAlternatives) {
+            const auto& merged = entry.second;
+            double confidence = merged.count > 0 ? merged.confidenceSum / static_cast<double>(merged.count) : 0.0;
+
+            std::string reason;
+            for (size_t i = 0; i < merged.reasons.size(); ++i) {
+                if (i > 0) {
+                    reason += "; ";
+                }
+                reason += merged.reasons[i];
+            }
+
+            evaluation.alternatives.emplace_back(
+                merged.value,
+                confidence,
+                merged.risk,
+                reason.empty() ? "Guard-proposed alternative" : reason
+            );
+        }
+
+        std::sort(evaluation.alternatives.begin(), evaluation.alternatives.end(),
+                  [&](const Alternative& left, const Alternative& right) {
+            if (left.confidence != right.confidence) {
+                return left.confidence > right.confidence;
+            }
+            int leftRisk = riskRank(left.risk);
+            int rightRisk = riskRank(right.risk);
+            if (leftRisk != rightRisk) {
+                return leftRisk < rightRisk;
+            }
+            return left.value < right.value;
+        });
     } else {
         evaluation.reason = "All guards passed";
     }
