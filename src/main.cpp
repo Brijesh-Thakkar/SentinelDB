@@ -12,17 +12,9 @@
 #include "command.h"
 #include "status.h"
 #include "wal.h"
+#include "replay_service.h"
 
 namespace {
-    bool isAllDigits(const std::string& text) {
-        if (text.empty()) {
-            return false;
-        }
-        return std::all_of(text.begin(), text.end(), [](unsigned char c) {
-            return std::isdigit(c);
-        });
-    }
-
     std::string guardResultToString(GuardResult result) {
         switch (result) {
             case GuardResult::ACCEPT: return "ACCEPT";
@@ -30,74 +22,6 @@ namespace {
             case GuardResult::COUNTER_OFFER: return "COUNTER_OFFER";
         }
         return "REJECT";
-    }
-
-    std::string joinTokens(const std::vector<std::string>& tokens) {
-        std::ostringstream oss;
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            if (i > 0) {
-                oss << ' ';
-            }
-            oss << tokens[i];
-        }
-        return oss.str();
-    }
-
-    bool parseSetLine(const std::string& cmdLine,
-                      std::string& key,
-                      std::string& value,
-                      std::optional<long long>& timestampMs,
-                      bool allowTimestamp) {
-        std::istringstream iss(cmdLine);
-        std::string cmdType;
-        if (!(iss >> cmdType) || cmdType != "SET") {
-            return false;
-        }
-
-        if (!(iss >> std::quoted(key))) {
-            return false;
-        }
-
-        std::string remainder;
-        std::getline(iss >> std::ws, remainder);
-        if (remainder.empty()) {
-            return false;
-        }
-
-        if (!remainder.empty() && remainder.front() == '"') {
-            std::istringstream valueStream(remainder);
-            if (!(valueStream >> std::quoted(value))) {
-                return false;
-            }
-
-            long long ts = 0;
-            if (allowTimestamp && (valueStream >> ts)) {
-                timestampMs = ts;
-            }
-            return true;
-        }
-
-        std::istringstream valueStream(remainder);
-        std::vector<std::string> parts;
-        std::string part;
-        while (valueStream >> part) {
-            parts.push_back(part);
-        }
-        if (parts.empty()) {
-            return false;
-        }
-
-        if (allowTimestamp && parts.size() > 1 && isAllDigits(parts.back())) {
-            try {
-                timestampMs = std::stoll(parts.back());
-                parts.pop_back();
-            } catch (...) {
-                timestampMs.reset();
-            }
-        }
-
-        value = joinTokens(parts);
-        return true;
     }
 }
 
@@ -1091,199 +1015,13 @@ int main() {
         // Create KVStore with WAL
         auto kvstore = std::make_shared<KVStore>(wal);
         
-        // Load snapshot first (if it exists)
         if (walStatus == Status::OK) {
-            std::vector<std::string> snapshotCommands = wal->readSnapshot();
-            if (!snapshotCommands.empty()) {
-                std::cout << "Loading snapshot...\n";
-                // Disable WAL during replay to avoid duplicate logging
-                kvstore->setWalEnabled(false);
-                auto snapshotTime = std::chrono::system_clock::now();
-                
-                // First pass: Load policy, retention config, and guards from snapshot
-                for (const auto& cmdLine : snapshotCommands) {
-                    std::istringstream iss(cmdLine);
-                    std::string cmdType;
-                    iss >> cmdType;
-
-                    if (cmdType == "POLICY") {
-                        std::string subCmd, policyName;
-                        iss >> subCmd >> policyName;
-                        if (subCmd == "SET") {
-                            DecisionPolicy policy;
-                            if (policyName == "DEV_FRIENDLY") {
-                                policy = DecisionPolicy::DEV_FRIENDLY;
-                            } else if (policyName == "SAFE_DEFAULT") {
-                                policy = DecisionPolicy::SAFE_DEFAULT;
-                            } else if (policyName == "STRICT") {
-                                policy = DecisionPolicy::STRICT;
-                            } else {
-                                continue;
-                            }
-                            kvstore->setDecisionPolicy(policy);
-                        }
-                    } else if (cmdType == "CONFIG") {
-                        std::string subCmd, modeToken;
-                        iss >> subCmd >> modeToken;
-                        std::transform(subCmd.begin(), subCmd.end(), subCmd.begin(), ::toupper);
-                        std::transform(modeToken.begin(), modeToken.end(), modeToken.begin(), ::toupper);
-
-                        if (subCmd == "RETENTION") {
-                            if (modeToken == "FULL") {
-                                kvstore->setRetentionPolicy(RetentionPolicy());
-                            } else if (modeToken == "LAST") {
-                                std::string valueToken;
-                                iss >> valueToken;
-                                if (!valueToken.empty()) {
-                                    bool isTimeBased = false;
-                                    if (!valueToken.empty() &&
-                                        (valueToken.back() == 's' || valueToken.back() == 'S')) {
-                                        isTimeBased = true;
-                                        valueToken.pop_back();
-                                    }
-
-                                    try {
-                                        int value = std::stoi(valueToken);
-                                        if (value > 0) {
-                                            if (isTimeBased) {
-                                                kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_T, value));
-                                            } else {
-                                                kvstore->setRetentionPolicy(RetentionPolicy(RetentionMode::LAST_N, value));
-                                            }
-                                        }
-                                    } catch (...) {
-                                        // Ignore invalid retention config
-                                    }
-                                }
-                            }
-                        }
-                    } else if (cmdType == "GUARD") {
-                        std::string subCmd, guardType, name, keyPattern;
-                        iss >> subCmd >> guardType >> name >> keyPattern;
-
-                        if (subCmd == "ADD") {
-                            try {
-                                std::shared_ptr<Guard> guard;
-
-                                if (guardType == "RANGE_INT") {
-                                    int min, max;
-                                    iss >> min >> max;
-                                    if (!kvstore->hasGuard(name)) {
-                                        guard = std::make_shared<RangeIntGuard>(name, keyPattern, min, max);
-                                        kvstore->addGuard(guard);
-                                    }
-                                } else if (guardType == "ENUM") {
-                                    std::vector<std::string> values;
-                                    std::string value;
-                                    while (iss >> value) {
-                                        values.push_back(value);
-                                    }
-                                    if (!values.empty() && !kvstore->hasGuard(name)) {
-                                        guard = std::make_shared<EnumGuard>(name, keyPattern, values);
-                                        kvstore->addGuard(guard);
-                                    }
-                                } else if (guardType == "LENGTH") {
-                                    size_t min, max;
-                                    iss >> min >> max;
-                                    if (!kvstore->hasGuard(name)) {
-                                        guard = std::make_shared<LengthGuard>(name, keyPattern, min, max);
-                                        kvstore->addGuard(guard);
-                                    }
-                                }
-                            } catch (...) {
-                                // Ignore invalid guard entries in snapshot
-                            }
-                        }
-                    }
-                }
-                
-                // Second pass: Load data from snapshot
-                for (const auto& cmdLine : snapshotCommands) {
-                    std::istringstream iss(cmdLine);
-                    std::string cmdType;
-                    iss >> cmdType;
-
-                    // Only replay SET commands from snapshot.
-                    // Use setAtTime to avoid logging, but use current time since snapshot doesn't store timestamps.
-                    if (cmdType == "SET") {
-                        std::string key, value;
-                        std::optional<long long> ignoredTimestamp;
-                        if (parseSetLine(cmdLine, key, value, ignoredTimestamp, false) && !key.empty()) {
-                            kvstore->setAtTime(key, value, snapshotTime);
-                        }
-                    }
-                }
-                kvstore->setWalEnabled(true);
-                std::cout << "Snapshot loaded. Restored " << kvstore->size() << " keys\n";
+            auto stats = ReplayService::replay(kvstore, wal);
+            if (stats.snapshotApplied) {
+                std::cout << "Snapshot loaded. Restored " << stats.keysAfterSnapshot << " keys\n";
             }
-            
-            // Then replay WAL (changes since last snapshot)
-            std::vector<std::string> commands = wal->readLog();
-            if (!commands.empty()) {
-                std::cout << "Replaying WAL...\n";
-                // Disable WAL during replay to avoid duplicate logging
-                kvstore->setWalEnabled(false);
-                
-                // PHASE 1: Replay POLICY commands first (before data)
-                for (const auto& cmdLine : commands) {
-                    std::istringstream iss(cmdLine);
-                    std::string cmdType;
-                    iss >> cmdType;
-                    
-                    if (cmdType == "POLICY") {
-                        std::string subCmd, policyName;
-                        iss >> subCmd >> policyName;
-                        
-                        if (subCmd == "SET") {
-                            DecisionPolicy policy;
-                            if (policyName == "DEV_FRIENDLY") {
-                                policy = DecisionPolicy::DEV_FRIENDLY;
-                            } else if (policyName == "SAFE_DEFAULT") {
-                                policy = DecisionPolicy::SAFE_DEFAULT;
-                            } else if (policyName == "STRICT") {
-                                policy = DecisionPolicy::STRICT;
-                            } else {
-                                continue; // Skip invalid policy
-                            }
-                            
-                            // Set policy without logging (we're replaying)
-                            kvstore->setWalEnabled(false);
-                            kvstore->setDecisionPolicy(policy);
-                        }
-                    }
-                }
-                
-                // PHASE 2: Replay data commands
-                for (const auto& cmdLine : commands) {
-                    // Parse command line manually to extract timestamp
-                    std::istringstream iss(cmdLine);
-                    std::string cmdType;
-                    iss >> cmdType;
-                    
-                    if (cmdType == "SET") {
-                        std::string key, value;
-                        std::optional<long long> timestampMs;
-                        if (!parseSetLine(cmdLine, key, value, timestampMs, true) || key.empty()) {
-                            continue;
-                        }
-
-                        if (timestampMs.has_value()) {
-                            auto timestamp = std::chrono::system_clock::time_point(
-                                std::chrono::milliseconds(timestampMs.value()));
-                            kvstore->setAtTime(key, value, timestamp);
-                        } else {
-                            kvstore->setAtTime(key, value, std::chrono::system_clock::now());
-                        }
-                    } else if (cmdType == "DEL") {
-                        std::string key;
-                        iss >> key;
-                        if (!key.empty()) {
-                            kvstore->del(key);
-                        }
-                    }
-                }
-                kvstore->setWalEnabled(true);
-                std::cout << "WAL replay complete. Restored " << kvstore->size() << " keys\n";
+            if (stats.walCommands > 0) {
+                std::cout << "WAL replay complete. Restored " << stats.keysAfterWal << " keys\n";
             }
         }
         

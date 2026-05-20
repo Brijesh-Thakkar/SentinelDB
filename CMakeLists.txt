@@ -16,6 +16,7 @@ set(SOURCES
     src/command_parser.cpp
     src/wal.cpp
     src/guard.cpp
+    src/replay_service.cpp
 )
 
 # Create executable
@@ -27,6 +28,7 @@ add_executable(test_temporal
     src/kvstore.cpp
     src/wal.cpp
     src/guard.cpp
+    src/replay_service.cpp
 )
 
 # Create test executable for temporal WAL
@@ -35,6 +37,7 @@ add_executable(test_wal_temporal
     src/kvstore.cpp
     src/wal.cpp
     src/guard.cpp
+    src/replay_service.cpp
 )
 
 # Create HTTP server executable
@@ -43,6 +46,7 @@ add_executable(http_server
     src/kvstore.cpp
     src/wal.cpp
     src/guard.cpp
+    src/replay_service.cpp
 )
 
 # Link pthread for all targets
