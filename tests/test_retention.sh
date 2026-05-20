@@ -3,14 +3,15 @@
 echo "=== Temporal Retention Policy Testing ==="
 echo ""
 
-cd /home/brijesh-thakkar/Desktop/DSA_Project
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 
 # Test 1: LAST_N retention
 echo "Test 1: LAST_N Retention (keep last 2 versions)"
 echo "-----------------------------------------------"
 rm -rf data/
 cat << 'EOF' | ./build/redis_db 2>&1 | grep -E "(redis>|version|OK -)"
-CONFIG RETENTION LAST_N 2
+CONFIG RETENTION LAST 2
 SET value v1
 SET value v2
 SET value v3
@@ -49,9 +50,9 @@ SET item c
 SET item d
 SET item e
 HISTORY item
-CONFIG RETENTION LAST_N 3
+CONFIG RETENTION LAST 3
 HISTORY item
-CONFIG RETENTION LAST_N 2
+CONFIG RETENTION LAST 2
 HISTORY item
 EXIT
 EOF
@@ -62,7 +63,7 @@ echo "Test 4: Multiple Keys with Same Policy"
 echo "---------------------------------------"
 rm -rf data/
 cat << 'EOF' | ./build/redis_db 2>&1 | grep -E "(redis>|version|OK -|key)"
-CONFIG RETENTION LAST_N 2
+CONFIG RETENTION LAST 2
 SET key1 a
 SET key1 b
 SET key1 c
@@ -80,7 +81,7 @@ echo "Test 5: Retention Persists After Restart"
 echo "-----------------------------------------"
 rm -rf data/
 cat << 'EOF' | ./build/redis_db 2>&1 > /dev/null
-CONFIG RETENTION LAST_N 2
+CONFIG RETENTION LAST 2
 SET price 100
 SET price 150
 SET price 200

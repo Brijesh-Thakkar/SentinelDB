@@ -272,6 +272,32 @@ Status WAL::logAudit(const std::string& key,
     }
 }
 
+Status WAL::logRetention(const std::string& retentionCommand) {
+    if (!enabled || !logFile.is_open()) {
+        return Status::ERROR;
+    }
+
+    if (retentionCommand.empty()) {
+        return Status::ERROR;
+    }
+
+    try {
+        uint32_t crc = computeCRC32(retentionCommand);
+        logFile << retentionCommand << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
+                << crc << std::dec << std::setfill(' ') << "\n";
+        logFile.flush();
+        {
+            std::lock_guard<std::mutex> lock(flushMutex_);
+            pendingFlush_ = true;
+        }
+        flushCV_.notify_one();
+        return Status::OK;
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: Failed to write retention to WAL: " << e.what() << "\n";
+        return Status::ERROR;
+    }
+}
+
 std::vector<std::string> WAL::readLog() {
     std::vector<std::string> commands;
     size_t checksumErrors = 0;

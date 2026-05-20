@@ -90,6 +90,18 @@ std::pair<long long, long long> smallestCoveringWindow(std::vector<long long> va
 
     return {values[bestStart], values[bestStart + coverageCount - 1]};
 }
+
+std::string retentionPolicyToCommand(const RetentionPolicy& policy) {
+    switch (policy.mode) {
+        case RetentionMode::FULL:
+            return "CONFIG RETENTION FULL";
+        case RetentionMode::LAST_N:
+            return "CONFIG RETENTION LAST " + std::to_string(policy.count);
+        case RetentionMode::LAST_T:
+            return "CONFIG RETENTION LAST " + std::to_string(policy.seconds) + "s";
+    }
+    return "";
+}
 }
 
 KVStore::KVStore(std::shared_ptr<WAL> walPtr) 
@@ -465,6 +477,13 @@ void KVStore::setRetentionPolicy(const RetentionPolicy& policy) {
     for (auto& [key, versions] : store) {
         if (!versions.empty()) {
             applyRetention(key);
+        }
+    }
+
+    if (walEnabled && wal && wal->isEnabled()) {
+        std::string command = retentionPolicyToCommand(policy);
+        if (!command.empty()) {
+            wal->logRetention(command);
         }
     }
 }

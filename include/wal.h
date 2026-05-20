@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <thread>
 #include <condition_variable>
+#include <mutex>
 #include "status.h"
 
 // Write-Ahead Log manager for persistence
@@ -65,6 +66,9 @@ public:
                     const std::string& guards,
                     const std::string& alternatives,
                     std::chrono::system_clock::time_point timestamp);
+
+    // Log retention configuration changes
+    Status logRetention(const std::string& retentionCommand);
     
     // Read all commands from WAL file
     std::vector<std::string> readLog();
