@@ -169,7 +169,7 @@ void ReplayService::replayConfigCommands(const std::vector<std::string>& command
             }
         } else if (cmdType == "GUARD") {
             std::string subCmd, guardType, name, keyPattern;
-            iss >> subCmd >> guardType >> name >> keyPattern;
+            iss >> subCmd >> guardType >> std::quoted(name) >> std::quoted(keyPattern);
 
             if (subCmd != "ADD") {
                 continue;
@@ -188,7 +188,7 @@ void ReplayService::replayConfigCommands(const std::vector<std::string>& command
                 } else if (guardType == "ENUM") {
                     std::vector<std::string> values;
                     std::string value;
-                    while (iss >> value) {
+                    while (iss >> std::quoted(value)) {
                         values.push_back(value);
                     }
                     if (!values.empty() && !kvstore->hasGuard(name)) {
@@ -219,7 +219,7 @@ void ReplayService::replayConfigCommands(const std::vector<std::string>& command
                 } else if (guardType == "CROSS_KEY") {
                     std::string otherKey;
                     double factor = 0.0;
-                    iss >> otherKey >> factor;
+                    iss >> std::quoted(otherKey) >> factor;
                     if (!otherKey.empty() && !kvstore->hasGuard(name)) {
                         guard = std::make_shared<CrossKeyGuard>(name, keyPattern, otherKey, factor);
                         kvstore->addGuard(guard);
@@ -259,7 +259,7 @@ void ReplayService::replayDataCommands(const std::vector<std::string>& commands,
             }
         } else if (cmdType == "DEL") {
             std::string key;
-            iss >> key;
+            iss >> std::quoted(key);
             if (!key.empty()) {
                 kvstore->del(key);
             }

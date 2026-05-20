@@ -1334,7 +1334,15 @@ int main(int argc, char* argv[]) {
                     walParams = std::to_string(requireIntField(params, "min")) + " " +
                                 std::to_string(requireIntField(params, "max"));
                 } else if (type == "ENUM") {
-                    walParams = joinWalValues(parseEnumValues(params));
+                    std::ostringstream oss;
+                    auto values = parseEnumValues(params);
+                    for (size_t i = 0; i < values.size(); ++i) {
+                        if (i > 0) {
+                            oss << ' ';
+                        }
+                        oss << std::quoted(values[i]);
+                    }
+                    walParams = oss.str();
                 } else if (type == "LENGTH") {
                     walParams = std::to_string(requireSizeField(params, "min")) + " " +
                                 std::to_string(requireSizeField(params, "max"));
@@ -1345,8 +1353,10 @@ int main(int argc, char* argv[]) {
                 } else if (type == "RATE_CHANGE") {
                     walParams = std::to_string(requireDoubleField(params, "maxPercent"));
                 } else if (type == "CROSS_KEY") {
-                    walParams = requireStringField(params, "otherKey") + " " +
-                                std::to_string(requireDoubleField(params, "factor"));
+                    std::ostringstream oss;
+                    oss << std::quoted(requireStringField(params, "otherKey"))
+                        << " " << std::to_string(requireDoubleField(params, "factor"));
+                    walParams = oss.str();
                 }
                 
                 Status walStatus = wal->logGuardAdd(type, name, keyPattern, walParams);

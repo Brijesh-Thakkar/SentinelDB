@@ -153,7 +153,9 @@ Status WAL::logDel(const std::string& key) {
     }
     
     try {
-        std::string content = "DEL " + key;
+        std::ostringstream contentStream;
+        contentStream << "DEL " << std::quoted(key);
+        std::string content = contentStream.str();
         uint32_t crc = computeCRC32(content);
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
             << crc << std::dec << std::setfill(' ') << "\n";
@@ -202,8 +204,14 @@ Status WAL::logGuardAdd(const std::string& guardType, const std::string& guardNa
     }
     
     try {
-        std::string content = "GUARD ADD " + guardType + " " + guardName + " "
-            + keyPattern + " " + params;
+        std::ostringstream contentStream;
+        contentStream << "GUARD ADD " << guardType << " "
+                      << std::quoted(guardName) << " "
+                      << std::quoted(keyPattern);
+        if (!params.empty()) {
+            contentStream << " " << params;
+        }
+        std::string content = contentStream.str();
         uint32_t crc = computeCRC32(content);
         logFile << content << " CRC:" << std::hex << std::setw(8) << std::setfill('0')
                 << crc << std::dec << std::setfill(' ') << "\n";
