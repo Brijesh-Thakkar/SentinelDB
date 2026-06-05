@@ -153,12 +153,93 @@ See `deploy/gcp/` for systemd service and nginx reverse proxy configs.
 | `SENTINEL_API_KEY` | Enable API key authentication |
 
 ## Architecture
-```
-Request → Input Validation → Guard Evaluation → Policy Decision → WAL Write → Store
-                                                       ↓
-                                              ACCEPT / COUNTER_OFFER / REJECT
+
+### System Components
+
+```mermaid
+flowchart TD
+    subgraph Client Layer
+        CLI[Command Line Interface]
+        HTTP[HTTP REST API]
+        SDK[Python SDK]
+    end
+
+    subgraph Server Core
+        Parser[Command Parser]
+        InputVal[Input Validation]
+        
+        subgraph Negotiation Engine
+            Guards[Guard Evaluator]
+            Policies[Decision Policies]
+        end
+        
+        WALMem[WAL In-Memory Buffer]
+        GC[Group Commit Thread]
+        
+        subgraph Storage Engine
+            KV[KVStore map<string, vector<Version>>]
+            LRU[LRU Eviction Manager]
+            Retention[Temporal Retention Manager]
+        end
+    end
+
+    subgraph Persistence Layer
+        WALDisk[(WAL File .log)]
+        Snapshot[(Snapshot File .rdb)]
+    end
+
+    CLI --> Parser
+    HTTP --> Parser
+    SDK --> HTTP
+    
+    Parser --> InputVal
+    InputVal --> Guards
+    Guards <--> Policies
+    
+    Guards --> |Accept/Counter| WALMem
+    Guards -.-> |Reject/Counter| Parser
+    
+    WALMem --> |Batch Flush| GC
+    GC --> WALDisk
+    
+    WALMem --> KV
+    KV <--> LRU
+    KV <--> Retention
+    
+    KV -.-> |Periodic| Snapshot
 ```
 
+### Write & Negotiation Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant G as Guard Engine
+    participant P as Policy Engine
+    participant W as WAL
+    participant K as KVStore
+
+    C->>S: PROPOSE / SET (Key, Value)
+    S->>G: Evaluate Constraints
+    G->>P: Check Policy
+    
+    alt Guard Violation (STRICT)
+        P-->>S: REJECT
+        S-->>C: Error: Guard Violation
+    else Guard Violation (SAFE_DEFAULT)
+        P-->>S: COUNTER_OFFER
+        S-->>C: Alternatives Available
+    else Valid Request
+        P-->>S: ACCEPT
+        S->>W: Append to Log
+        W->>W: Group Commit (fsync)
+        S->>K: Store Temporal Version
+        S-->>C: OK
+    end
+```
+
+### Component Details
 - **WAL**: append-only log with CRC32 per record, fsync via background group commit thread
 - **KVStore**: `unordered_map<string, vector<Version>>` with shared_mutex
 - **Guards**: pattern-matched constraints evaluated per write proposal
