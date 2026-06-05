@@ -24,8 +24,10 @@ db.safe_set("score", "150")  # commits "100" automatically
 ## Features
 
 - **Negotiation engine** — propose writes, get safe alternatives instead of hard rejections
-- **Temporal versioning** — every key stores full version history with timestamps
-- **WAL durability** — fsync + CRC32 corruption detection (same primitives as SQLite/RocksDB)
+- **Temporal versioning** — every key stores full version history with timestamps. Support for time-travel queries.
+- **Retention policies** — configure how many versions to keep (`FULL`, `LAST N`, `LAST Ts`)
+- **Decision policies** — persistent policies (`STRICT`, `SAFE_DEFAULT`, `DEV_FRIENDLY`) that dictate negotiation behavior
+- **WAL durability** — fsync + CRC32 corruption detection (same primitives as SQLite/RocksDB), with policy persistence
 - **Concurrent safe** — shared_mutex reader-writer locking, verified under 100 simultaneous writes
 - **Group commit** — batched fsyncs every 5ms: 52 → 2,700 writes/sec concurrent
 - **LRU eviction** — configurable key limit, prevents RAM exhaustion
@@ -78,6 +80,9 @@ db.set("score", "90")
 history = db.history("score")
 # [Version(value='80', timestamp='...'), Version(value='90', timestamp='...')]
 
+# Time-travel queries
+past_value = db.get_at("score", "2026-02-02 14:30:00")
+
 # Guard-based negotiation
 db.add_guard("score_guard", "score*", "RANGE_INT", min=0, max=100)
 result = db.propose("score", "150")
@@ -93,14 +98,18 @@ db.safe_set("score", "150")  # auto-commits best alternative
 | `/health` | GET | Server status, key count, WAL status |
 | `/set` | POST | Write key-value pair |
 | `/get` | GET | Read latest value |
+| `/getAt` | GET | Read value at specific timestamp |
 | `/delete` | DELETE | Delete a key |
 | `/history` | GET | All versions of a key |
 | `/propose` | POST | Evaluate write without committing |
 | `/guards` | GET/POST | List or add guard constraints |
-| `/policy` | GET/POST | View or change decision policy |
+| `/policy` | GET/POST | View or change decision policy (persisted to WAL) |
+| `/config/retention`| POST | Set retention policy (`FULL`, `LAST N`, `LAST Ts`) |
 | `/metrics` | GET | Prometheus metrics |
 
 ### Decision Policies
+
+Policies can be set via CLI (`POLICY SET <name>`) or HTTP (`POST /policy`) and are persisted in the WAL.
 
 | Policy | Behavior |
 |--------|----------|
@@ -154,6 +163,7 @@ Request → Input Validation → Guard Evaluation → Policy Decision → WAL Wr
 - **KVStore**: `unordered_map<string, vector<Version>>` with shared_mutex
 - **Guards**: pattern-matched constraints evaluated per write proposal
 - **LRU**: `std::list` + iterator map for O(1) eviction tracking
+- **Temporal & Retention**: `vector` of versions per key, pruned automatically according to `FULL`, `LAST N` or `LAST Ts` policies.
 
 ## Build Requirements
 
