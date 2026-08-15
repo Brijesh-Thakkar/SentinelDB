@@ -1,17 +1,13 @@
 cmake_minimum_required(VERSION 3.10)
-project(RedisLikeDB)
+project(SentinelDB)
 
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Include directories
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_SOURCE_DIR}/include/external/spdlog/include)
 
-# Source files
-set(SOURCES
-    src/main.cpp
+add_library(sentineldb_core STATIC
     src/kvstore.cpp
     src/command_parser.cpp
     src/wal.cpp
@@ -19,48 +15,24 @@ set(SOURCES
     src/replay_service.cpp
 )
 
-# Create executable
-add_executable(redis_db ${SOURCES})
+if(UNIX)
+    target_link_libraries(sentineldb_core pthread)
+endif()
 
-# Create test executable for temporal features
-add_executable(test_temporal 
-    src/test_temporal.cpp
-    src/kvstore.cpp
-    src/wal.cpp
-    src/guard.cpp
-    src/replay_service.cpp
-)
+add_executable(sentineldb_cli src/main.cpp)
+add_executable(http_server src/http_server.cpp)
+add_executable(test_temporal src/test_temporal.cpp)
+add_executable(test_wal_temporal src/test_wal_temporal.cpp)
 
-# Create test executable for temporal WAL
-add_executable(test_wal_temporal
-    src/test_wal_temporal.cpp
-    src/kvstore.cpp
-    src/wal.cpp
-    src/guard.cpp
-    src/replay_service.cpp
-)
-
-# Create HTTP server executable
-add_executable(http_server
-    src/http_server.cpp
-    src/kvstore.cpp
-    src/wal.cpp
-    src/guard.cpp
-    src/replay_service.cpp
-)
-
-# Link pthread for all targets
-foreach(target redis_db test_temporal test_wal_temporal http_server)
-    if(UNIX)
-        target_link_libraries(${target} pthread)
+foreach(target sentineldb_cli http_server test_temporal test_wal_temporal)
+    target_link_libraries(${target} sentineldb_core)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endforeach()
 
-# Enable warnings
-if(MSVC)
-    target_compile_options(redis_db PRIVATE /W4)
-    target_compile_options(http_server PRIVATE /W4)
-else()
-    target_compile_options(redis_db PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(http_server PRIVATE -Wall -Wextra -Wpedantic)
+if(NOT MSVC)
+    target_compile_options(sentineldb_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -48,6 +48,15 @@ struct RetentionPolicy {
           seconds(m == RetentionMode::LAST_T ? val : 0) {}
 };
 
+inline std::string retentionPolicyToCommand(const RetentionPolicy& policy) {
+    switch (policy.mode) {
+        case RetentionMode::FULL:   return "CONFIG RETENTION FULL";
+        case RetentionMode::LAST_N: return "CONFIG RETENTION LAST " + std::to_string(policy.count);
+        case RetentionMode::LAST_T: return "CONFIG RETENTION LAST " + std::to_string(policy.seconds) + "s";
+    }
+    return "";
+}
+
 // Explain result for temporal queries
 struct ExplainResult {
     bool found;
@@ -180,10 +189,14 @@ private:
     // Apply retention policy to a key's versions
     void applyRetention(const std::string& key);
     
-    // Simulate write on copy without mutating real state
+    std::optional<std::string> getValueAtInternal(const std::string& key,
+                                                   std::chrono::system_clock::time_point timestamp) const;
+
+    WriteEvaluation evaluateGuards(const std::string& key, const std::string& value,
+                                    const std::vector<std::shared_ptr<Guard>>& guardsToEvaluate) const;
+
     WriteEvaluation simulateWrite(const std::string& key, const std::string& value);
-    
-    // Apply decision policy to guard evaluation results
+
     void applyDecisionPolicy(WriteEvaluation& evaluation);
 
     // Append an audit event for a negotiated write

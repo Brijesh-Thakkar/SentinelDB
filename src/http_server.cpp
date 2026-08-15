@@ -135,17 +135,6 @@ std::vector<std::string> parseEnumValues(const json& body) {
     return values;
 }
 
-std::string joinWalValues(const std::vector<std::string>& values) {
-    std::ostringstream oss;
-    for (size_t i = 0; i < values.size(); ++i) {
-        if (i > 0) {
-            oss << ' ';
-        }
-        oss << values[i];
-    }
-    return oss.str();
-}
-
 std::string escapeJSON(const std::string& str);
 
 std::string formatConfidence(double value) {
@@ -154,23 +143,6 @@ std::string formatConfidence(double value) {
     return oss.str();
 }
 
-std::string guardResultToString(GuardResult result) {
-    switch (result) {
-        case GuardResult::ACCEPT: return "ACCEPT";
-        case GuardResult::REJECT: return "REJECT";
-        case GuardResult::COUNTER_OFFER: return "COUNTER_OFFER";
-    }
-    return "REJECT";
-}
-
-std::string decisionPolicyToString(DecisionPolicy policy) {
-    switch (policy) {
-        case DecisionPolicy::DEV_FRIENDLY: return "DEV_FRIENDLY";
-        case DecisionPolicy::SAFE_DEFAULT: return "SAFE_DEFAULT";
-        case DecisionPolicy::STRICT: return "STRICT";
-    }
-    return "SAFE_DEFAULT";
-}
 
 void appendWriteEvaluationJSON(std::stringstream& json, const std::string& key,
                                const std::string& value, const WriteEvaluation& evaluation) {

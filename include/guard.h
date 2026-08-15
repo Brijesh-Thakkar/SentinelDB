@@ -39,6 +39,24 @@ inline const char* riskLevelToString(RiskLevel level) {
     return "high";
 }
 
+inline const char* decisionPolicyToString(DecisionPolicy policy) {
+    switch (policy) {
+        case DecisionPolicy::DEV_FRIENDLY: return "DEV_FRIENDLY";
+        case DecisionPolicy::SAFE_DEFAULT: return "SAFE_DEFAULT";
+        case DecisionPolicy::STRICT: return "STRICT";
+    }
+    return "SAFE_DEFAULT";
+}
+
+inline const char* guardResultToString(GuardResult result) {
+    switch (result) {
+        case GuardResult::ACCEPT: return "ACCEPT";
+        case GuardResult::REJECT: return "REJECT";
+        case GuardResult::COUNTER_OFFER: return "COUNTER_OFFER";
+    }
+    return "REJECT";
+}
+
 // Alternative value with score and safety context
 struct Alternative {
     std::string value;

@@ -14,36 +14,26 @@
 #include "wal.h"
 #include "replay_service.h"
 
-namespace {
-    std::string guardResultToString(GuardResult result) {
-        switch (result) {
-            case GuardResult::ACCEPT: return "ACCEPT";
-            case GuardResult::REJECT: return "REJECT";
-            case GuardResult::COUNTER_OFFER: return "COUNTER_OFFER";
-        }
-        return "REJECT";
-    }
-}
 
-class RedisLikeCLI {
+class SentinelCLI {
 private:
     std::shared_ptr<KVStore> kvstore;
     std::shared_ptr<WAL> wal;
     bool running;
 
 public:
-    explicit RedisLikeCLI(std::shared_ptr<KVStore> store, std::shared_ptr<WAL> walPtr) 
+    explicit SentinelCLI(std::shared_ptr<KVStore> store, std::shared_ptr<WAL> walPtr) 
         : kvstore(store), wal(walPtr), running(true) {}
 
     void run() {
-        std::cout << "Redis-like Key-Value Database\n";
+        std::cout << "SentinelDB - Negotiating Key-Value Store\n";
         std::cout << "Commands: SET key value | GET key | GET key AT <timestamp> | HISTORY key\n";
         std::cout << "          DIFF key <t1> <t2> | ROLLBACK key TO <timestamp> | DEL key\n";
         std::cout << "          AUDIT key [since] | SNAPSHOT | CONFIG RETENTION <mode> | EXIT\n";
         std::cout << "Type 'EXIT' to quit\n\n";
 
         while (running) {
-            std::cout << "redis> ";
+            std::cout << "sentinel> ";
             std::string input;
             
             // Read entire line
@@ -190,30 +180,6 @@ private:
         }
     }
 
-    std::string buildRetentionSnapshotCommand() const {
-        const RetentionPolicy& policy = kvstore->getRetentionPolicy();
-        switch (policy.mode) {
-            case RetentionMode::FULL:
-                return "CONFIG RETENTION FULL";
-            case RetentionMode::LAST_N:
-                return "CONFIG RETENTION LAST " + std::to_string(policy.count);
-            case RetentionMode::LAST_T:
-                return "CONFIG RETENTION LAST " + std::to_string(policy.seconds) + "s";
-        }
-        return "";
-    }
-
-    std::string joinGuardValues(const std::vector<std::string>& values) const {
-        std::ostringstream oss;
-        for (size_t i = 0; i < values.size(); ++i) {
-            if (i > 0) {
-                oss << ' ';
-            }
-            oss << values[i];
-        }
-        return oss.str();
-    }
-
     std::vector<std::string> buildGuardSnapshotCommands() const {
         std::vector<std::string> commands;
         const auto& guards = kvstore->getGuards();
@@ -230,8 +196,10 @@ private:
                 if (!values.empty()) {
                     std::ostringstream oss;
                     oss << "GUARD ADD ENUM " << enumGuard->getName() << " "
-                        << enumGuard->getKeyPattern() << " "
-                        << joinGuardValues(values);
+                        << enumGuard->getKeyPattern();
+                    for (const auto& v : values) {
+                        oss << ' ' << v;
+                    }
                     commands.push_back(oss.str());
                 }
             } else if (auto lengthGuard = std::dynamic_pointer_cast<LengthGuard>(guard)) {
@@ -269,23 +237,9 @@ private:
             return;
         }
         
-        // Get current policy name
-        DecisionPolicy policy = kvstore->getDecisionPolicy();
-        std::string policyName;
-        switch (policy) {
-            case DecisionPolicy::DEV_FRIENDLY:
-                policyName = "DEV_FRIENDLY";
-                break;
-            case DecisionPolicy::SAFE_DEFAULT:
-                policyName = "SAFE_DEFAULT";
-                break;
-            case DecisionPolicy::STRICT:
-                policyName = "STRICT";
-                break;
-        }
-        
+        std::string policyName = decisionPolicyToString(kvstore->getDecisionPolicy());
         std::vector<std::string> guardCommands = buildGuardSnapshotCommands();
-        std::string retentionCommand = buildRetentionSnapshotCommand();
+        std::string retentionCommand = retentionPolicyToCommand(kvstore->getRetentionPolicy());
 
         // Create snapshot with current store data, policy, guards, and retention config
         Status status = wal->createSnapshot(kvstore->getAllData(), policyName, guardCommands, retentionCommand);
@@ -585,10 +539,7 @@ private:
             if (event.finalValue.has_value()) {
                 std::cout << "   Final:    \"" << event.finalValue.value() << "\"\n";
             }
-            std::cout << "   Policy:   "
-                      << (event.policyUsed == DecisionPolicy::DEV_FRIENDLY ? "DEV_FRIENDLY" :
-                          event.policyUsed == DecisionPolicy::STRICT ? "STRICT" : "SAFE_DEFAULT")
-                      << "\n";
+            std::cout << "   Policy:   " << decisionPolicyToString(event.policyUsed) << "\n";
 
             if (!event.guardsFired.empty()) {
                 std::cout << "   Guards:   ";
@@ -1028,7 +979,7 @@ int main() {
         std::cout << "\n";
         
         // Start CLI
-        RedisLikeCLI cli(kvstore, wal);
+        SentinelCLI cli(kvstore, wal);
         cli.run();
         
         // Flush WAL before exiting
