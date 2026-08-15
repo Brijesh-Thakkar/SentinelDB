@@ -225,28 +225,19 @@ WriteEvaluation KVStore::evaluateGuards(const std::string& key, const std::strin
 }
 
 Status KVStore::set(const std::string& key, const std::string& value) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     return setInternal(key, value);
 }
 
 Status KVStore::setInternal(const std::string& key, const std::string& value) {
-    // Create version with current timestamp
     auto timestamp = std::chrono::system_clock::now();
     
-    // Write to WAL first (if enabled)
     if (walEnabled && wal && wal->isEnabled()) {
-        Status walStatus = wal->logSet(key, value, timestamp);
-        // Continue even if WAL write fails (warn user but don't crash)
-        if (walStatus != Status::OK) {
-            // Warning already printed by WAL
-        }
+        wal->logSet(key, value, timestamp);
     }
-    
-    // Append new version to in-memory store
+
     store[key].emplace_back(timestamp, value);
-    
-    // Apply retention policy
     applyRetention(key);
 
     touchKey(key);
@@ -261,55 +252,44 @@ Status KVStore::setInternal(const std::string& key, const std::string& value) {
 
 Status KVStore::setAtTime(const std::string& key, const std::string& value,
                           std::chrono::system_clock::time_point timestamp) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
-    // This is for replay - do NOT log to WAL
-    // Just add the version with the given timestamp
+    // For replay only — do NOT log to WAL
     store[key].emplace_back(timestamp, value);
-    
-    // Apply retention policy
     applyRetention(key);
     
     return Status::OK;
 }
 
 std::optional<std::string> KVStore::get(const std::string& key) {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
     if (it != store.end() && !it->second.empty()) {
-        // Return the latest version (last element)
         return it->second.back().value;
     }
     return std::nullopt;
 }
 
 Status KVStore::del(const std::string& key) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
-    if (it != store.end()) {
-        // Write to WAL first (if enabled)
-        if (walEnabled && wal && wal->isEnabled()) {
-            Status walStatus = wal->logDel(key);
-            // Continue even if WAL write fails
-            if (walStatus != Status::OK) {
-                // Warning already printed by WAL
-            }
-        }
-        
-        // Remove all versions from in-memory store
-        store.erase(it);
-        {
-            auto lruIt = lruMap_.find(key);
-            if (lruIt != lruMap_.end()) {
-                lruOrder_.erase(lruIt->second);
-                lruMap_.erase(lruIt);
-            }
-        }
-        return Status::OK;
+    if (it == store.end()) {
+        return Status::NOT_FOUND;
     }
-    return Status::NOT_FOUND;
+
+    if (walEnabled && wal && wal->isEnabled()) {
+        wal->logDel(key);
+    }
+
+    store.erase(it);
+    auto lruIt = lruMap_.find(key);
+    if (lruIt != lruMap_.end()) {
+        lruOrder_.erase(lruIt->second);
+        lruMap_.erase(lruIt);
+    }
+    return Status::OK;
 }
 
 std::optional<std::string> KVStore::getAtTime(const std::string& key,
@@ -407,7 +387,7 @@ RollbackResult KVStore::rollbackToTime(const std::string& key,
 
 ExplainResult KVStore::explainGetAtTime(const std::string& key,
                                          std::chrono::system_clock::time_point timestamp) {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     ExplainResult result;
     result.found = false;
@@ -424,7 +404,6 @@ ExplainResult KVStore::explainGetAtTime(const std::string& key,
     const auto& versions = it->second;
     result.totalVersions = versions.size();
     
-    // Track which version we select and which we skip
     std::optional<size_t> selectedIndex;
     
     for (size_t i = 0; i < versions.size(); ++i) {
@@ -477,7 +456,7 @@ ExplainResult KVStore::explainGetAtTime(const std::string& key,
 }
 
 std::vector<Version> KVStore::getHistory(const std::string& key) {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     auto it = store.find(key);
     if (it != store.end()) {
@@ -487,19 +466,19 @@ std::vector<Version> KVStore::getHistory(const std::string& key) {
 }
 
 bool KVStore::exists(const std::string& key) const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return store.find(key) != store.end();
 }
 
 size_t KVStore::size() const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return store.size();
 }
 
 std::unordered_map<std::string, std::string> KVStore::getAllData() const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     std::unordered_map<std::string, std::string> result;
     for (const auto& [key, versions] : store) {
@@ -516,11 +495,10 @@ void KVStore::setWalEnabled(bool enabled) {
 }
 
 void KVStore::setRetentionPolicy(const RetentionPolicy& policy) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     retentionPolicy = policy;
-    
-    // Apply new policy to all existing keys
+
     for (auto& [key, versions] : store) {
         if (!versions.empty()) {
             applyRetention(key);
@@ -536,7 +514,7 @@ void KVStore::setRetentionPolicy(const RetentionPolicy& policy) {
 }
 
 const RetentionPolicy& KVStore::getRetentionPolicy() const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return retentionPolicy;
 }
@@ -583,29 +561,19 @@ void KVStore::applyRetention(const std::string& key) {
     
     switch (retentionPolicy.mode) {
         case RetentionMode::FULL:
-            // Keep all versions
             break;
-            
+
         case RetentionMode::LAST_N:
-            // Keep only the last N versions
             if (retentionPolicy.count > 0 && versions.size() > static_cast<size_t>(retentionPolicy.count)) {
-                // Erase old versions from the beginning
-                versions.erase(versions.begin(), 
-                              versions.end() - retentionPolicy.count);
+                versions.erase(versions.begin(), versions.end() - retentionPolicy.count);
             }
             break;
-            
+
         case RetentionMode::LAST_T:
-            // Keep only versions within the last T seconds
             if (retentionPolicy.seconds > 0) {
-                auto now = std::chrono::system_clock::now();
-                auto cutoff = now - std::chrono::seconds(retentionPolicy.seconds);
-                
-                // Find first version to keep (first one >= cutoff)
+                auto cutoff = std::chrono::system_clock::now() - std::chrono::seconds(retentionPolicy.seconds);
                 auto firstToKeep = std::find_if(versions.begin(), versions.end(),
                     [cutoff](const Version& v) { return v.timestamp >= cutoff; });
-                
-                // Erase old versions
                 if (firstToKeep != versions.begin()) {
                     versions.erase(versions.begin(), firstToKeep);
                 }
@@ -614,8 +582,6 @@ void KVStore::applyRetention(const std::string& key) {
     }
 }
 
-// ========== Write Evaluation & Guard Management ==========
-
 WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string& value) {
     auto applicableGuards = getGuardsForKeyInternal(key);
     return evaluateGuards(key, value, applicableGuards);
@@ -623,31 +589,25 @@ WriteEvaluation KVStore::simulateWrite(const std::string& key, const std::string
 
 void KVStore::applyDecisionPolicy(WriteEvaluation& evaluation) {
     evaluation.appliedPolicy = decisionPolicy;
-    
-    // If all guards passed, no policy needed
+
     if (evaluation.result == GuardResult::ACCEPT) {
         evaluation.policyReasoning = "No policy applied - all guards passed";
         return;
     }
-    
-    // Apply policy based on current result
+
     switch (decisionPolicy) {
         case DecisionPolicy::STRICT:
-            // STRICT: Convert all COUNTER_OFFER to REJECT
             if (evaluation.result == GuardResult::COUNTER_OFFER) {
                 evaluation.result = GuardResult::REJECT;
                 evaluation.policyReasoning = "Rejected under STRICT policy due to guard violation";
-                evaluation.alternatives.clear();  // No alternatives in strict mode
+                evaluation.alternatives.clear();
             } else {
                 evaluation.policyReasoning = "Rejected under STRICT policy due to guard violation";
             }
             break;
-            
+
         case DecisionPolicy::DEV_FRIENDLY:
-            // DEV_FRIENDLY: Convert REJECT to COUNTER_OFFER if alternatives exist
             if (evaluation.result == GuardResult::REJECT) {
-                // Check if we can generate any alternatives
-                // For now, keep as REJECT since guards returned it
                 evaluation.policyReasoning = "Rejected under DEV_FRIENDLY policy - value cannot be salvaged";
             } else if (evaluation.result == GuardResult::COUNTER_OFFER) {
                 evaluation.policyReasoning = "Counter-offer under DEV_FRIENDLY policy - showing alternatives";
@@ -655,16 +615,11 @@ void KVStore::applyDecisionPolicy(WriteEvaluation& evaluation) {
             break;
             
         case DecisionPolicy::SAFE_DEFAULT:
-            // SAFE_DEFAULT: Analyze risk and decide
             if (evaluation.result == GuardResult::COUNTER_OFFER) {
-                // Check if this is a "low-risk" violation
-                // For now, we'll consider violations with alternatives as low-risk
                 if (evaluation.alternatives.empty()) {
-                    // High-risk: no safe alternatives
                     evaluation.result = GuardResult::REJECT;
                     evaluation.policyReasoning = "Rejected under SAFE_DEFAULT policy - no safe alternatives available";
                 } else {
-                    // Low-risk: alternatives available
                     evaluation.policyReasoning = "Counter-offer under SAFE_DEFAULT policy - safe alternatives available";
                 }
             } else if (evaluation.result == GuardResult::REJECT) {
@@ -866,12 +821,9 @@ GuardLearningSnapshot KVStore::buildGuardLearningSnapshotUnlocked(const std::str
 }
 
 WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& value) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
-    // Simulate without mutating state
     auto evaluation = simulateWrite(key, value);
-    
-    // Apply decision policy to the evaluation result
     applyDecisionPolicy(evaluation);
 
     std::optional<std::string> finalValue;
@@ -886,7 +838,7 @@ WriteEvaluation KVStore::proposeSet(const std::string& key, const std::string& v
 }
 
 Status KVStore::commitSet(const std::string& key, const std::string& value) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     // Direct commit (bypasses guards - use for forced writes)
     return setInternal(key, value);
@@ -1019,7 +971,7 @@ Status KVStore::commitBatch(const std::vector<std::pair<std::string, std::string
 }
 
 void KVStore::addGuard(std::shared_ptr<Guard> guard) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     guard->setValueProvider([this](const std::string& targetKey) -> std::optional<std::string> {
         auto it = store.find(targetKey);
@@ -1032,7 +984,7 @@ void KVStore::addGuard(std::shared_ptr<Guard> guard) {
 }
 
 bool KVStore::hasGuard(const std::string& name) const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return std::find_if(guards.begin(), guards.end(),
         [&name](const std::shared_ptr<Guard>& g) { 
@@ -1041,7 +993,7 @@ bool KVStore::hasGuard(const std::string& name) const {
 }
 
 bool KVStore::removeGuard(const std::string& name) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     auto it = std::find_if(guards.begin(), guards.end(),
         [&name](const std::shared_ptr<Guard>& g) { return g->getName() == name; });
@@ -1054,13 +1006,13 @@ bool KVStore::removeGuard(const std::string& name) {
 }
 
 const std::vector<std::shared_ptr<Guard>>& KVStore::getGuards() const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return guards;
 }
 
 std::vector<std::shared_ptr<Guard>> KVStore::getGuardsForKey(const std::string& key) const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return getGuardsForKeyInternal(key);
 }
@@ -1078,30 +1030,17 @@ std::vector<std::shared_ptr<Guard>> KVStore::getGuardsForKeyInternal(const std::
 }
 
 void KVStore::setDecisionPolicy(DecisionPolicy policy) {
-    // Thread safety: reader/writer lock
+
     std::unique_lock<std::shared_mutex> lock(rwMutex_);
     decisionPolicy = policy;
     
-    // Log policy change to WAL
     if (walEnabled && wal && wal->isEnabled()) {
-        std::string policyName;
-        switch (policy) {
-            case DecisionPolicy::DEV_FRIENDLY:
-                policyName = "DEV_FRIENDLY";
-                break;
-            case DecisionPolicy::SAFE_DEFAULT:
-                policyName = "SAFE_DEFAULT";
-                break;
-            case DecisionPolicy::STRICT:
-                policyName = "STRICT";
-                break;
-        }
-        wal->logPolicy(policyName);
+        wal->logPolicy(decisionPolicyToString(policy));
     }
 }
 
 DecisionPolicy KVStore::getDecisionPolicy() const {
-    // Thread safety: reader/writer lock
+
     std::shared_lock<std::shared_mutex> lock(rwMutex_);
     return decisionPolicy;
 }
