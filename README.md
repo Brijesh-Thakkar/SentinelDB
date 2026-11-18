@@ -28,9 +28,9 @@ db.safe_set("score", "150")  # commits "100" automatically
 - **Retention policies** — configure how many versions to keep (`FULL`, `LAST N`, `LAST Ts`)
 - **Decision policies** — persistent policies (`STRICT`, `SAFE_DEFAULT`, `DEV_FRIENDLY`) that dictate negotiation behavior
 - **WAL durability** — fsync + CRC32 corruption detection (same primitives as SQLite/RocksDB), with policy persistence
-- **Concurrent safe** — shared_mutex reader-writer locking, verified under 100 simultaneous writes
-- **Group commit** — batched fsyncs every 5ms: 52 → 2,700 writes/sec concurrent
-- **LRU eviction** — configurable key limit, prevents RAM exhaustion
+- **Concurrent safe** — shared_mutex reader-writer locking, stress-tested locally with 100 concurrent writers (test not yet in repo)
+- **Background fsync** — a flusher thread takes fsync off the request path and coalesces fsyncs (see Performance)
+- **LRU eviction** — key-count cap (100,000, set in code) with O(1) least-recently-written eviction
 - **Prometheus metrics** — `/metrics` endpoint with request counts and latency
 - **API key auth** — optional via `SENTINEL_API_KEY` environment variable
 - **Python SDK** — full-featured client with type hints
@@ -118,13 +118,16 @@ Policies can be set via CLI (`POLICY SET <name>`) or HTTP (`POST /policy`) and a
 | `DEV_FRIENDLY` | Always guide toward valid values |
 
 ## Performance
-```
-Sequential 500 writes (before): 9.591s = 52 writes/sec
-Sequential 500 writes (after):  6.471s = 77 writes/sec
-Concurrent 500 writes (after):  0.185s = 2,700 writes/sec
-```
 
-Group commit batches fsync() calls every 5ms window — same durability guarantee, fraction of the cost.
+`POST /set` measured with ApacheBench (`ab`, no keep-alive), Release build, on a laptop:
+13th Gen Intel Core i5-13420H (12 threads), Linux, NVMe ext4 (the disk was nearly full during the runs, which may inflate fsync latency).
+
+| Build | 1 client (`-c 1`) | 50 clients (`-c 50`) |
+|---|---|---|
+| fsync inline on every write (previous behaviour) | 180 req/s | 187 req/s |
+| background flusher thread (current) | 9,050 req/s | 45,700 req/s |
+
+Writes are acknowledged after write() and before fsync (similar to MongoDB j:false); a power loss can drop a few ms of acknowledged writes.
 
 ## Deployment
 
@@ -174,7 +177,7 @@ flowchart TD
         end
         
         WALMem[WAL In-Memory Buffer]
-        GC[Group Commit Thread]
+        GC["background fsync (coalesced, acked before fsync)"]
         
         subgraph Storage Engine
             KV[KVStore map<string, vector<Version>>]
@@ -233,14 +236,14 @@ sequenceDiagram
     else Valid Request
         P-->>S: ACCEPT
         S->>W: Append to Log
-        W->>W: Group Commit (fsync)
+        W->>W: background fsync (coalesced, acked before fsync)
         S->>K: Store Temporal Version
         S-->>C: OK
     end
 ```
 
 ### Component Details
-- **WAL**: append-only log with CRC32 per record, fsync via background group commit thread
+- **WAL**: append-only log with CRC32 per record, background fsync (coalesced, acked before fsync)
 - **KVStore**: `unordered_map<string, vector<Version>>` with shared_mutex
 - **Guards**: pattern-matched constraints evaluated per write proposal
 - **LRU**: `std::list` + iterator map for O(1) eviction tracking
